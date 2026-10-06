@@ -1,6 +1,6 @@
 """
-Aalu Chipas Minecraft Server Builder Discord Bot
-24/7 Cloud Edition for Render with Gemini AI & Role-based Cooldowns
+Tillu Minecraft Discord Bot
+24/7 Cloud Edition for Render with Gemini AI, Natural Chat & Role Cooldowns
 Author: Antigravity Pair Programmer
 """
 
@@ -185,29 +185,39 @@ def send_whitelist_command(ign: str) -> bool:
         return False
 
 # ── GEMINI AI KNOWLEDGE & QUERY ──────────────────────────────────────────────
-SYSTEM_KNOWLEDGE = f"""You are Aalu Bot, the official AI assistant for the AALU_CHIPAS Minecraft Server & Live Community.
+SYSTEM_KNOWLEDGE = f"""You are Tillu, the friendly, witty, and helpful AI assistant and co-host for AALU_CHIPAS and the AALU_CHIPAS Minecraft Server & Live Community.
 
 MINECRAFT SERVER DETAILS:
 - Server Address (Java): {SERVER_HOST}:{SERVER_PORT} (Supports 1.7 to 1.21.x cross-version)
 - Server Address (Bedrock/PE/Mobile): IP: {SERVER_HOST} | Port: {SERVER_PORT}
 - Features: OneBlock Void, Survival SMP with villager trading, Superheroes PvP Arena (kits: Spiderman, Ironman, Thor, Hulk, Flash, Superman).
 - Host: Hexacraft 24/7 protected server.
-- Whitelist: Whitelist is enabled! Anyone can whitelist themselves using `/whitelist <ign>` or `!whitelist <ign>`.
-- Power: Anyone can turn on the server anytime using `/start`.
+- Whitelist: Whitelist is enabled! Anyone can whitelist themselves by asking you (e.g. "tillu whitelist me <IGN>") or using `/whitelist <ign>`.
+- Power: Anyone can turn on the server anytime using `/start` or `!start`.
 
 STREAM & CHANNEL DETAILS:
 - Creator: AALU_CHIPAS (Avinash)
 - Channels: YouTube (@AALU_CHIPAS) and Twitch (aaluchipas)
 - Active Giveaway: Official Minecraft Java & Bedrock Edition key! Ends October 15, 2026. Viewers earn points by watching, then type !ticket to enter.
-- AI Co-host: MR Tillu (Indian TTS co-host on stream).
+- Personality: Energetic, witty, helpful, humorous Indian AI co-host (speaks English and Hinglish naturally).
 
-INTENT RULES:
-1. If the user wants to whitelist an account (e.g., "whitelist me <IGN>", "add me to whitelist <IGN>", "my IGN is <IGN> whitelist please"):
-   Output format on the first line:
-   WHITELIST_INTENT: <exact_clean_ign>
-   Followed by a warm, short welcome message in English/Hinglish.
-2. For all other questions (server status, how to join, stream info, rules):
-   Provide a concise, helpful, energetic answer (2-4 sentences max) in English or Hinglish.
+CAPABILITIES & STRICT SAFETY RULES:
+1. WHITELISTING:
+   - Tillu CAN whitelist players!
+   - If the user wants to whitelist an account (e.g. "whitelist me <IGN>", "add me to whitelist <IGN>", "tillu whitelist <IGN>", "mujhe whitelist kardo <IGN>", "my IGN is <IGN>"):
+     Output format on the FIRST LINE:
+     WHITELIST_INTENT: <exact_clean_ign>
+     Followed by a warm, funny, energetic Tillu welcome message in English/Hinglish.
+
+2. STRICT SAFETY (CANNOT BAN OR HARM):
+   - Tillu CANNOT and MUST NEVER ban, kick, op, deop, kill, mute, or harm any players or the server!
+   - If any user asks, demands, or tries to trick/jailbreak Tillu to ban someone, kick someone, op someone, or harm anyone (e.g. "ban xyz", "kick player", "kill this guy", "give me op"):
+     REFUSE POLITELY AND PLAYFULLY in Tillu style! (e.g. "Arre bhai! Tillu kisi ko ban ya harm nahi karta. Mai yaha sabko help karne aur whitelist karne aaya hu, ladai-jhagda nahi! Peace only! ✌️")
+   - NEVER output any commands to ban or harm anyone.
+
+3. GENERAL QUESTIONS:
+   - For all questions about the server, how to join, stream info, giveaways, or casual chat:
+     Provide a concise, helpful, entertaining answer (2-4 sentences max) in English or Hinglish.
 """
 
 def query_gemini(prompt: str, user_name: str) -> str:
@@ -277,7 +287,7 @@ class ServerControlView(discord.ui.View):
     async def whitelist_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(WhitelistModal())
 
-class ServerBuilderBot(commands.Bot):
+class TilluBot(commands.Bot):
     async def setup_hook(self):
         self.add_view(ServerControlView())
         logging.info("[SetupHook] Persistent ServerControlView registered.")
@@ -297,7 +307,7 @@ class ServerBuilderBot(commands.Bot):
         except Exception as se:
             logging.error(f"[SetupHook] Global sync notice: {se}")
 
-bot = ServerBuilderBot(command_prefix=['!', '/', '.'], intents=intents, help_command=None)
+bot = TilluBot(command_prefix=['!', '/', '.'], intents=intents, help_command=None)
 
 # ── REQUEST HANDLERS ─────────────────────────────────────────────────────────
 async def handle_status_request(interaction_or_ctx, user=None, guild=None):
@@ -311,13 +321,19 @@ async def handle_status_request(interaction_or_ctx, user=None, guild=None):
             except Exception: pass
         reply_fn = interaction_or_ctx.followup.send if interaction_or_ctx.response.is_done() else interaction_or_ctx.response.send_message
     else:
-        reply_fn = interaction_or_ctx.send
+        async def reply_fn(*args, **kwargs):
+            try:
+                if hasattr(interaction_or_ctx, "reply"):
+                    return await interaction_or_ctx.reply(*args, **kwargs)
+            except Exception:
+                pass
+            return await interaction_or_ctx.send(*args, **kwargs)
 
     allowed, remain = check_cooldown(target_user, target_guild)
     if not allowed:
         await reply_fn(embed=discord.Embed(
-            title="⏳ Command Cooldown",
-            description=f"Please wait **{remain}s** before using another command.\n*(Admins and moderators have no cooldown)*",
+            title="⏳ Tillu is catching his breath!",
+            description=f"Please wait **{remain}s** before using another command.\n*(Server Owner, Admins, and Mods have no cooldown)*",
             color=0xF1C40F
         ))
         return
@@ -334,7 +350,7 @@ async def handle_status_request(interaction_or_ctx, user=None, guild=None):
         embed.add_field(name="⚡ Version", value=f"`{ver}`\n*(Crossplay 1.7 - 1.21.x & Bedrock)*", inline=True)
         embed.add_field(name="☕ Java Connection", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
         embed.add_field(name="📱 Bedrock Connection", value=f"IP: `{SERVER_HOST}` | Port: `{SERVER_PORT}`", inline=False)
-        embed.set_footer(text="Aalu Server Builder • 24/7 Always-Online Active")
+        embed.set_footer(text="Tillu • 24/7 Always-Online Active")
         await reply_fn(embed=embed, view=ServerControlView())
     else:
         embed = discord.Embed(
@@ -342,9 +358,9 @@ async def handle_status_request(interaction_or_ctx, user=None, guild=None):
             description="The server is currently stopped. Click below to turn it on!",
             color=0xE74C3C
         )
-        embed.add_field(name="🚀 How to turn on?", value="Click **🟢 Turn On Server** below or type `!start` in chat.", inline=False)
-        embed.add_field(name="📝 Join Whitelist", value="Click **📝 Whitelist Me** or type `/whitelist <ign>`.", inline=False)
-        embed.set_footer(text="Aalu Server Builder • Click below to play!")
+        embed.add_field(name="🚀 How to turn on?", value="Click **🟢 Turn On Server** below, type `/start`, or say `tillu start server`.", inline=False)
+        embed.add_field(name="📝 Join Whitelist", value="Click **📝 Whitelist Me** or tell Tillu `whitelist me <ign>`.", inline=False)
+        embed.set_footer(text="Tillu • Click below to play!")
         await reply_fn(embed=embed, view=ServerControlView())
 
 async def handle_start_request(interaction_or_ctx, user, guild=None):
@@ -358,13 +374,19 @@ async def handle_start_request(interaction_or_ctx, user, guild=None):
             except Exception: pass
         reply_fn = interaction_or_ctx.followup.send if interaction_or_ctx.response.is_done() else interaction_or_ctx.response.send_message
     else:
-        reply_fn = interaction_or_ctx.send
+        async def reply_fn(*args, **kwargs):
+            try:
+                if hasattr(interaction_or_ctx, "reply"):
+                    return await interaction_or_ctx.reply(*args, **kwargs)
+            except Exception:
+                pass
+            return await interaction_or_ctx.send(*args, **kwargs)
 
     allowed, remain = check_cooldown(user, target_guild)
     if not allowed:
         await reply_fn(embed=discord.Embed(
-            title="⏳ Command Cooldown",
-            description=f"Please wait **{remain}s** before using another command.\n*(Admins and moderators have no cooldown)*",
+            title="⏳ Tillu is catching his breath!",
+            description=f"Please wait **{remain}s** before using another command.\n*(Server Owner, Admins, and Mods have no cooldown)*",
             color=0xF1C40F
         ))
         return
@@ -398,7 +420,7 @@ async def handle_start_request(interaction_or_ctx, user, guild=None):
             )
             embed_init.add_field(name="📍 Server Address", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
             embed_init.add_field(name="⏳ Expected Boot Time", value="~25-45 seconds for Paper to load worlds.", inline=False)
-            embed_init.set_footer(text="Aalu Server Builder • 24/7 Cloud Host")
+            embed_init.set_footer(text="Tillu • 24/7 Cloud Host")
             await reply_fn(embed=embed_init, view=ServerControlView())
 
             await asyncio.to_thread(send_pterodactyl_start)
@@ -419,7 +441,7 @@ async def handle_start_request(interaction_or_ctx, user, guild=None):
                 )
                 embed_ready.add_field(name="☕ Java Connection", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
                 embed_ready.add_field(name="📱 Bedrock Connection", value=f"IP: `{SERVER_HOST}` | Port: `{SERVER_PORT}`", inline=False)
-                embed_ready.set_footer(text="Aalu Server Builder • Have fun!")
+                embed_ready.set_footer(text="Tillu • Have fun!")
                 if is_inter and interaction_or_ctx.channel:
                     await interaction_or_ctx.channel.send(content=f"🔔 {user.mention} the Minecraft server is online!", embed=embed_ready, view=ServerControlView())
                 else:
@@ -451,23 +473,41 @@ async def handle_whitelist_request(interaction_or_ctx, ign: str, user, guild=Non
             except Exception: pass
         reply_fn = interaction_or_ctx.followup.send if interaction_or_ctx.response.is_done() else interaction_or_ctx.response.send_message
     else:
-        reply_fn = interaction_or_ctx.send
+        async def reply_fn(*args, **kwargs):
+            try:
+                if hasattr(interaction_or_ctx, "reply"):
+                    return await interaction_or_ctx.reply(*args, **kwargs)
+            except Exception:
+                pass
+            return await interaction_or_ctx.send(*args, **kwargs)
 
     if not bypass_cooldown:
         allowed, remain = check_cooldown(user, target_guild)
         if not allowed:
             await reply_fn(embed=discord.Embed(
-                title="⏳ Command Cooldown",
-                description=f"Please wait **{remain}s** before using another command.\n*(Admins and moderators have no cooldown)*",
+                title="⏳ Tillu is catching his breath!",
+                description=f"Please wait **{remain}s** before using another command.\n*(Server Owner, Admins, and Mods have no cooldown)*",
                 color=0xF1C40F
             ))
             return
 
     if not ign:
-        await reply_fn("❌ Usage: `/whitelist <your_minecraft_ign>` or `!whitelist <ign>`")
+        await reply_fn("❌ Usage: `/whitelist <your_minecraft_ign>` or say `tillu whitelist me <ign>`")
         return
 
     clean_ign = ign.strip().replace('"', '').replace("'", '').replace("`", "")
+
+    # Strict Safety Guardrail: Prevent harmful commands or ban attempts
+    harmful_tokens = ["ban", "kick", "op", "deop", "kill", "stop", "clear", "gamemode", "sudo", "execute", "eval", "pardon"]
+    if any(h in clean_ign.lower().split() for h in harmful_tokens):
+        embed_err = discord.Embed(
+            title="🚫 Action Not Allowed",
+            description="Tillu only helps with whitelisting and friendly server info. Tillu cannot ban, kick, or harm players!",
+            color=0xE74C3C
+        )
+        await reply_fn(embed=embed_err)
+        return
+
     if not re.match(r'^[a-zA-Z0-9_.* ]{3,20}$', clean_ign):
         embed_err = discord.Embed(
             title="❌ Invalid Minecraft Username",
@@ -509,14 +549,14 @@ async def handle_whitelist_request(interaction_or_ctx, ign: str, user, guild=Non
     embed.add_field(name="📱 Bedrock Connection", value=f"IP: `{SERVER_HOST}` | Port: `{SERVER_PORT}`", inline=False)
 
     if prev_entry and prev_entry.get("ign") != clean_ign:
-        embed.set_footer(text=f"Updated from previous IGN: {prev_entry.get('ign')} • Follow rules & enjoy!")
+        embed.set_footer(text=f"Updated from previous IGN: {prev_entry.get('ign')} • Tillu is always here to help!")
     else:
-        embed.set_footer(text="Aalu Server Builder • 24/7 Always-Online Active")
+        embed.set_footer(text="Tillu • 24/7 Always-Online Active")
 
     await reply_fn(embed=embed, view=ServerControlView())
 
 async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None):
-    """Processes user query with Gemini AI, supporting natural language whitelist requests."""
+    """Processes user query with Gemini AI, supporting natural conversation and whitelist requests."""
     is_inter = isinstance(interaction_or_ctx, discord.Interaction)
     target_guild = guild or (interaction_or_ctx.guild if is_inter else interaction_or_ctx.guild)
 
@@ -526,13 +566,19 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None):
             except Exception: pass
         reply_fn = interaction_or_ctx.followup.send if interaction_or_ctx.response.is_done() else interaction_or_ctx.response.send_message
     else:
-        reply_fn = interaction_or_ctx.send
+        async def reply_fn(*args, **kwargs):
+            try:
+                if hasattr(interaction_or_ctx, "reply"):
+                    return await interaction_or_ctx.reply(*args, **kwargs)
+            except Exception:
+                pass
+            return await interaction_or_ctx.send(*args, **kwargs)
 
     allowed, remain = check_cooldown(user, target_guild)
     if not allowed:
         await reply_fn(embed=discord.Embed(
-            title="⏳ Command Cooldown",
-            description=f"Please wait **{remain}s** before asking another question.\n*(Admins and moderators have no cooldown)*",
+            title="⏳ Tillu is catching his breath!",
+            description=f"Please wait **{remain}s** before asking another question.\n*(Server Owner, Admins, and Mods have no cooldown)*",
             color=0xF1C40F
         ))
         return
@@ -545,22 +591,22 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None):
         match = re.search(r'WHITELIST_INTENT:\s*([a-zA-Z0-9_.* ]{3,20})', answer)
         if match:
             extracted_ign = match.group(1).strip()
-            logging.info(f"[Gemini Whitelist] Extracted IGN: '{extracted_ign}' from user: {user}")
+            logging.info(f"[Tillu Whitelist] Extracted IGN: '{extracted_ign}' from user: {user}")
             await handle_whitelist_request(interaction_or_ctx, extracted_ign, user, guild=target_guild, bypass_cooldown=True)
             return
 
     embed = discord.Embed(
-        title="🤖 Aalu AI Assistant",
+        title="🤖 Tillu",
         description=answer,
         color=0x9B59B6
     )
-    embed.add_field(name="❓ Your Question", value=f"*{query[:250]}*", inline=False)
-    embed.set_footer(text="Aalu Server Builder • Ask anything about SMP or stream!")
+    embed.add_field(name="❓ Question", value=f"*{query[:250]}*", inline=False)
+    embed.set_footer(text="Tillu • Ask me anything or say 'tillu whitelist me <IGN>'!")
     await reply_fn(embed=embed, view=ServerControlView())
 
 # ── SLASH COMMANDS ───────────────────────────────────────────────────────────
-@bot.tree.command(name="ask", description="Ask anything about the Minecraft server, stream, or request whitelist in natural text!")
-@app_commands.describe(query="What would you like to ask or do? (e.g. 'whitelist me GamerX' or 'how to join SMP')")
+@bot.tree.command(name="ask", description="Ask Tillu anything about the server, stream, or request whitelist!")
+@app_commands.describe(query="What would you like to ask Tillu? (e.g. 'whitelist me GamerX' or 'how to join SMP')")
 async def slash_ask(interaction: discord.Interaction, query: str):
     await handle_ask_request(interaction, query, user=interaction.user, guild=interaction.guild)
 
@@ -577,26 +623,26 @@ async def slash_status(interaction: discord.Interaction):
 async def slash_whitelist(interaction: discord.Interaction, ign: str):
     await handle_whitelist_request(interaction, ign, user=interaction.user, guild=interaction.guild)
 
-@bot.tree.command(name="help", description="Show Minecraft server builder bot commands")
+@bot.tree.command(name="help", description="Show Tillu bot commands & features")
 async def slash_help(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🤖 Server Builder Bot Commands",
-        description="Commands to manage and play on the Minecraft server!",
+        title="🤖 Tillu Bot Commands",
+        description="I am Tillu, your server assistant! Here's how you can talk to me:",
         color=0x9B59B6
     )
-    embed.add_field(name="💬 Ask AI", value="`/ask <query>` - Ask about server, stream, or whitelist in natural text!", inline=False)
+    embed.add_field(name="💬 Talk Naturally", value="Just type `tillu <question>` or `@Tillu <question>` anywhere in chat!", inline=False)
+    embed.add_field(name="🎟️ Whitelist Me", value="Say `tillu whitelist me <IGN>` or `/whitelist <ign>`", inline=False)
     embed.add_field(name="🚀 Turn On Server", value="`/start`, `!start`, or the green button below", inline=False)
-    embed.add_field(name="📝 Join Whitelist", value="`/whitelist <ign>` or `!whitelist <ign>`", inline=False)
     embed.add_field(name="🔍 Check Status", value="`/status`, `!status`, or `!ip`", inline=False)
-    embed.add_field(name="⏱️ Cooldown", value="20s cooldown for members • **No cooldown** for Owner, Admins & Mods", inline=False)
-    embed.set_footer(text="Aalu Server Builder • 24/7 Cloud Host")
+    embed.add_field(name="⏱️ Cooldown", value="20s cooldown for members • **0s cooldown** for Owner, Admins & Mods", inline=False)
+    embed.set_footer(text="Tillu • 24/7 Always-Online Active")
     await interaction.response.send_message(embed=embed, view=ServerControlView())
 
 # ── TEXT COMMANDS ────────────────────────────────────────────────────────────
-@bot.command(name="ask", aliases=["ai", "question"])
-async def cmd_ask(ctx, *, query: str = None):
+@bot.command(name="tillu", aliases=["ask", "ai", "question"])
+async def cmd_tillu(ctx, *, query: str = None):
     if not query:
-        await ctx.send("❌ Usage: `!ask <your question or whitelist request>`")
+        await ctx.send("❌ Usage: `!tillu <your question or whitelist request>`")
         return
     await handle_ask_request(ctx, query, user=ctx.author, guild=ctx.guild)
 
@@ -615,17 +661,57 @@ async def cmd_whitelist(ctx, *, ign: str = None):
 @bot.command(name="help")
 async def cmd_help(ctx):
     embed = discord.Embed(
-        title="🤖 Server Builder Bot Commands",
-        description="Commands to manage and play on the Minecraft server!",
+        title="🤖 Tillu Bot Commands",
+        description="I am Tillu, your server assistant! Here's how you can talk to me:",
         color=0x9B59B6
     )
-    embed.add_field(name="💬 Ask AI", value="`!ask <query>` or `/ask <query>`", inline=False)
+    embed.add_field(name="💬 Talk Naturally", value="Just type `tillu <question>` or `@Tillu <question>` anywhere in chat!", inline=False)
+    embed.add_field(name="🎟️ Whitelist Me", value="Say `tillu whitelist me <IGN>` or `/whitelist <ign>`", inline=False)
     embed.add_field(name="🚀 Turn On Server", value="`!start` or `/start`", inline=False)
-    embed.add_field(name="📝 Join Whitelist", value="`!whitelist <ign>` or `/whitelist <ign>`", inline=False)
     embed.add_field(name="🔍 Check Status", value="`!status` or `/status`", inline=False)
-    embed.add_field(name="⏱️ Cooldown", value="20s cooldown for members • **No cooldown** for Owner, Admins & Mods", inline=False)
-    embed.set_footer(text="Aalu Server Builder • 24/7 Cloud Host")
+    embed.add_field(name="⏱️ Cooldown", value="20s cooldown for members • **0s cooldown** for Owner, Admins & Mods", inline=False)
+    embed.set_footer(text="Tillu • 24/7 Cloud Host")
     await ctx.send(embed=embed, view=ServerControlView())
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+
+    # Process standard prefix commands first (e.g. !start, !whitelist, !tillu, !ask)
+    ctx = await bot.get_context(message)
+    if ctx.valid:
+        await bot.process_commands(message)
+        return
+
+    # Check for natural conversation directed at Tillu:
+    # 1. Bot is explicitly mentioned
+    # 2. Reply to a message sent by the bot
+    # 3. Message contains "tillu" or "mr tillu"
+    is_mentioned = bot.user in message.mentions if bot.user else False
+    is_reply = False
+    if message.reference and message.reference.resolved:
+        resolved = message.reference.resolved
+        if isinstance(resolved, discord.Message) and bot.user and resolved.author.id == bot.user.id:
+            is_reply = True
+
+    content = message.content.strip()
+    match_tillu = bool(re.search(r'\b(tillu|mr\s*tillu)\b', content, re.IGNORECASE))
+
+    if is_mentioned or is_reply or match_tillu:
+        # Clean query text
+        query = content
+        if bot.user:
+            query = re.sub(rf'<@!?{bot.user.id}>', '', query).strip()
+        query = re.sub(r'^(hey\s+|yo\s+|hello\s+|hi\s+|arre\s+)?(mr\s*tillu|tillu)[\s,:]*', '', query, flags=re.IGNORECASE).strip()
+        if not query:
+            query = content
+
+        try:
+            async with message.channel.typing():
+                await handle_ask_request(message, query, user=message.author, guild=message.guild)
+        except Exception as e:
+            logging.error(f"[on_message] Error handling natural query for Tillu: {e}")
 
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
@@ -642,7 +728,7 @@ async def on_interaction(interaction: discord.Interaction):
 
 # ── BACKGROUND KEEP-ALIVE HTTP SERVER & GUARDIAN ─────────────────────────────
 async def health_handler(request):
-    return web.Response(text=json.dumps({"status": "healthy", "service": "Aalu Server Builder Bot", "time": time.time()}), content_type="application/json")
+    return web.Response(text=json.dumps({"status": "healthy", "service": "Tillu Minecraft Bot", "time": time.time()}), content_type="application/json")
 
 async def start_web_server():
     app = web.Application()
@@ -676,10 +762,10 @@ async def guardian_loop():
         try:
             is_up, _, p_count, _, _ = await asyncio.to_thread(ping_minecraft_server, 2.0)
             if is_up:
-                activity = discord.Activity(type=discord.ActivityType.playing, name=f"Minecraft ({p_count}/50) | /ask")
+                activity = discord.Activity(type=discord.ActivityType.playing, name=f"Tillu | Minecraft ({p_count}/50)")
                 await bot.change_presence(status=discord.Status.online, activity=activity)
             else:
-                activity = discord.Activity(type=discord.ActivityType.listening, name="/ask | legacy-7.hexacraft.fun")
+                activity = discord.Activity(type=discord.ActivityType.listening, name="Tillu | legacy-7.hexacraft.fun")
                 await bot.change_presence(status=discord.Status.idle, activity=activity)
         except Exception:
             pass
@@ -688,8 +774,13 @@ async def guardian_loop():
 @bot.event
 async def on_ready():
     logging.info(f"==========================================================")
-    logging.info(f"  SERVER BUILDER BOT ONLINE: {bot.user} (ID: {bot.user.id})")
+    logging.info(f"  TILLU BOT ONLINE: {bot.user} (ID: {bot.user.id})")
     logging.info(f"==========================================================")
+    for guild in bot.guilds:
+        try:
+            await guild.me.edit(nick="Tillu")
+        except Exception:
+            pass
     asyncio.create_task(guardian_loop())
     asyncio.create_task(render_keepalive_loop())
 
@@ -699,3 +790,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
