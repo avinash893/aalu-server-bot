@@ -255,9 +255,42 @@ def query_gemini(prompt: str, user_name: str) -> str:
 # ── DISCORD BOT & UI ─────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
+intents.members = True
 
 start_lock = asyncio.Lock()
 is_starting = False
+
+REEL_VIDEO_PATTERNS = [
+    r'https?://(?:www\.)?instagram\.com/(?:reel|reels|p)/[a-zA-Z0-9_-]+',
+    r'https?://(?:www\.)?tiktok\.com/@[a-zA-Z0-9_.-]+/video/[0-9]+',
+    r'https?://(?:vt|vm)\.tiktok\.com/[a-zA-Z0-9]+',
+    r'https?://(?:www\.)?youtube\.com/shorts/[a-zA-Z0-9_-]+',
+    r'https?://(?:www\.)?youtube\.com/watch\?v=[a-zA-Z0-9_-]+',
+    r'https?://youtu\.be/[a-zA-Z0-9_-]+',
+    r'https?://(?:fb\.watch|www\.facebook\.com/reel)/[a-zA-Z0-9_-]+',
+]
+tracked_video_messages = set()
+
+def contains_reel_or_video(message: discord.Message) -> bool:
+    content = message.content or ""
+    for pat in REEL_VIDEO_PATTERNS:
+        if re.search(pat, content, re.IGNORECASE):
+            return True
+    for att in message.attachments:
+        fname = (att.filename or "").lower()
+        ctype = (att.content_type or "").lower()
+        if ctype.startswith("video/") or fname.endswith(('.mp4', '.mov', '.webm', '.mkv', '.avi')):
+            return True
+    return False
+
+def should_show_server_options(text: str) -> bool:
+    t = text.lower()
+    keywords = [
+        "server ip", "server address", "ip", "port", "whitelist", "server", 
+        "connect", "join", "turn on", "start server", "how to join", "kaise join kare", 
+        "ip kya hai", "address", "version", "crossplay", "bedrock"
+    ]
+    return any(k in t for k in keywords)
 
 class WhitelistModal(discord.ui.Modal, title="Minecraft Whitelist"):
     ign_input = discord.ui.TextInput(
@@ -595,14 +628,18 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None):
             await handle_whitelist_request(interaction_or_ctx, extracted_ign, user, guild=target_guild, bypass_cooldown=True)
             return
 
-    embed = discord.Embed(
-        title="🤖 Tillu",
-        description=answer,
-        color=0x9B59B6
-    )
-    embed.add_field(name="❓ Question", value=f"*{query[:250]}*", inline=False)
-    embed.set_footer(text="Tillu • Ask me anything or say 'tillu whitelist me <IGN>'!")
-    await reply_fn(embed=embed, view=ServerControlView())
+    # Only show options/buttons when query or answer is about server, ip, whitelist, etc.
+    if should_show_server_options(query) or should_show_server_options(answer):
+        embed = discord.Embed(
+            title="🤖 Tillu",
+            description=answer,
+            color=0x9B59B6
+        )
+        embed.set_footer(text="Tillu • legacy-7.hexacraft.fun")
+        await reply_fn(embed=embed, view=ServerControlView())
+    else:
+        # Otherwise just normally chat with them without options/buttons!
+        await reply_fn(content=answer)
 
 # ── SLASH COMMANDS ───────────────────────────────────────────────────────────
 @bot.tree.command(name="ask", description="Ask Tillu anything about the server, stream, or request whitelist!")
@@ -673,10 +710,84 @@ async def cmd_help(ctx):
     embed.set_footer(text="Tillu • 24/7 Cloud Host")
     await ctx.send(embed=embed, view=ServerControlView())
 
+async def delayed_video_reply(message: discord.Message):
+    try:
+        # Wait 5 minutes (300 seconds) before replying
+        await asyncio.sleep(300)
+
+        channel = message.channel
+        if not channel:
+            return
+
+        prompt = (
+            f"A user posted this reel or video in our Discord chat: '{message.content[:200]}'. "
+            f"You are Tillu, an Indian AI streamer companion. You just watched it after 5 minutes! "
+            f"Write a funny, witty, short reaction (1-2 lines) in Hinglish/English reacting to the video or meme. "
+            f"Sound like a genuine friend laughing or reacting. Do NOT mention whitelist or server commands."
+        )
+        reaction = await asyncio.to_thread(query_gemini, prompt, "Tillu")
+
+        if not reaction or "⚠️" in reaction or "WHITELIST_INTENT" in reaction:
+            import random
+            fallback_reactions = [
+                "Bhai 5 minute lag gaye dekhne me, par kya mast video tha yaar! 😂 Mazza aa gaya!",
+                "Yeh reel dekh ke has has ke bura haal ho gaya bhai 😂🔥 10/10 content!",
+                "Tillu approved reel! Pure 5 minute ka full entertainment tha boss! 👌",
+                "Arre bhai kya cheez share ki hai! Tillu ne pura dekh liya, ek number! 🔥😂"
+            ]
+            reaction = random.choice(fallback_reactions)
+
+        try:
+            await message.reply(reaction)
+        except Exception:
+            await channel.send(f"{message.author.mention} {reaction}")
+    except Exception as e:
+        logging.error(f"[delayed_video_reply] Error: {e}")
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    guild = member.guild
+    channel = guild.system_channel
+    if not channel or not channel.permissions_for(guild.me).send_messages:
+        for ch in guild.text_channels:
+            if any(name in ch.name.lower() for name in ["welcome", "general", "lounge", "chat", "main"]):
+                if ch.permissions_for(guild.me).send_messages:
+                    channel = ch
+                    break
+    if not channel:
+        for ch in guild.text_channels:
+            if ch.permissions_for(guild.me).send_messages:
+                channel = ch
+                break
+
+    if channel:
+        welcome_text = (
+            f"🎉 **Arre swagat hai, {member.mention}!** Welcome to **{guild.name}**!\n"
+            f"Mai hu **Tillu**, aapka dost aur server assistant! 🤖\n\n"
+            f"Agar humare Minecraft server me khelna hai, toh bas mujhe bolo `tillu whitelist me <IGN>` ya neeche button se whitelist karlo! Have fun! 🚀"
+        )
+        embed = discord.Embed(
+            title="👋 Welcome to the Community!",
+            description=welcome_text,
+            color=0x2ECC71
+        )
+        embed.set_thumbnail(url=member.display_avatar.url)
+        embed.add_field(name="☕ Java & Bedrock IP", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
+        embed.set_footer(text="Tillu • 24/7 Always-Online Active")
+        try:
+            await channel.send(embed=embed, view=ServerControlView())
+        except Exception as e:
+            logging.error(f"[on_member_join] Error sending welcome: {e}")
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
         return
+
+    # Check for reel or video link/attachment to reply after 5 minutes
+    if contains_reel_or_video(message) and message.id not in tracked_video_messages:
+        tracked_video_messages.add(message.id)
+        asyncio.create_task(delayed_video_reply(message))
 
     # Process standard prefix commands first (e.g. !start, !whitelist, !tillu, !ask)
     ctx = await bot.get_context(message)
