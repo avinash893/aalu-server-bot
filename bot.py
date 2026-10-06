@@ -1,6 +1,6 @@
 """
 Aalu Chipas Minecraft Server Builder Discord Bot
-24/7 Cloud Edition for Render
+24/7 Cloud Edition for Render with Gemini AI & Role-based Cooldowns
 Author: Antigravity Pair Programmer
 """
 
@@ -40,7 +40,48 @@ PTERO_SERVER = os.environ.get("PTERO_SERVER", "14c2ebb6")
 PORT = int(os.environ.get("PORT", "10000"))
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-latest"]
+
+COOLDOWN_SECONDS = 20
+user_cooldowns = {}
+
 WHITELIST_REGISTRY_PATH = os.path.join(os.path.dirname(__file__), "whitelist_registry.json")
+
+# ── COOLDOWN & PERMISSIONS ───────────────────────────────────────────────────
+def is_privileged_user(user, guild=None) -> bool:
+    """Check if user is Server Owner, Admin, or Moderator (0-second cooldown)."""
+    if not user:
+        return False
+    user_id = user.id
+
+    # Guild owner check
+    if guild and getattr(guild, 'owner_id', None) == user_id:
+        return True
+
+    # Member role & permission checks
+    if isinstance(user, discord.Member):
+        perms = user.guild_permissions
+        if perms.administrator or perms.manage_guild or perms.manage_messages or perms.moderate_members:
+            return True
+        for role in user.roles:
+            rname = role.name.lower()
+            if any(w in rname for w in ["admin", "owner", "mod", "moderator", "staff", "builder", "host"]):
+                return True
+
+    return False
+
+def check_cooldown(user, guild=None) -> tuple[bool, int]:
+    """Returns (is_allowed, remaining_seconds). Admins/Mods have 0 cooldown."""
+    if is_privileged_user(user, guild):
+        return True, 0
+    now = time.time()
+    last = user_cooldowns.get(user.id, 0)
+    elapsed = now - last
+    if elapsed < COOLDOWN_SECONDS:
+        return False, int(COOLDOWN_SECONDS - elapsed)
+    user_cooldowns[user.id] = now
+    return True, 0
 
 # ── LOCAL PERSISTENCE ────────────────────────────────────────────────────────
 def load_whitelist_registry() -> dict:
@@ -61,7 +102,6 @@ def save_whitelist_registry(data: dict):
 
 # ── MINECRAFT SLP PING ───────────────────────────────────────────────────────
 def ping_minecraft_server(timeout=2.5):
-    """Minecraft Server List Ping (SLP) to query real-time player count & status."""
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(timeout)
@@ -117,7 +157,6 @@ def ping_minecraft_server(timeout=2.5):
 
 # ── PTERODACTYL API HELPER ───────────────────────────────────────────────────
 def ptero_api_call(method: str, endpoint: str, json_data=None):
-    """Make authenticated call to Pterodactyl client API."""
     url = f"{PTERO_URL}/api/client/servers/{PTERO_SERVER}{endpoint}"
     headers = {
         "Authorization": f"Bearer {PTERO_KEY}",
@@ -145,6 +184,64 @@ def send_whitelist_command(ign: str) -> bool:
     except Exception:
         return False
 
+# ── GEMINI AI KNOWLEDGE & QUERY ──────────────────────────────────────────────
+SYSTEM_KNOWLEDGE = f"""You are Aalu Bot, the official AI assistant for the AALU_CHIPAS Minecraft Server & Live Community.
+
+MINECRAFT SERVER DETAILS:
+- Server Address (Java): {SERVER_HOST}:{SERVER_PORT} (Supports 1.7 to 1.21.x cross-version)
+- Server Address (Bedrock/PE/Mobile): IP: {SERVER_HOST} | Port: {SERVER_PORT}
+- Features: OneBlock Void, Survival SMP with villager trading, Superheroes PvP Arena (kits: Spiderman, Ironman, Thor, Hulk, Flash, Superman).
+- Host: Hexacraft 24/7 protected server.
+- Whitelist: Whitelist is enabled! Anyone can whitelist themselves using `/whitelist <ign>` or `!whitelist <ign>`.
+- Power: Anyone can turn on the server anytime using `/start`.
+
+STREAM & CHANNEL DETAILS:
+- Creator: AALU_CHIPAS (Avinash)
+- Channels: YouTube (@AALU_CHIPAS) and Twitch (aaluchipas)
+- Active Giveaway: Official Minecraft Java & Bedrock Edition key! Ends October 15, 2026. Viewers earn points by watching, then type !ticket to enter.
+- AI Co-host: MR Tillu (Indian TTS co-host on stream).
+
+INTENT RULES:
+1. If the user wants to whitelist an account (e.g., "whitelist me <IGN>", "add me to whitelist <IGN>", "my IGN is <IGN> whitelist please"):
+   Output format on the first line:
+   WHITELIST_INTENT: <exact_clean_ign>
+   Followed by a warm, short welcome message in English/Hinglish.
+2. For all other questions (server status, how to join, stream info, rules):
+   Provide a concise, helpful, energetic answer (2-4 sentences max) in English or Hinglish.
+"""
+
+def query_gemini(prompt: str, user_name: str) -> str:
+    if not GEMINI_API_KEY:
+        return "⚠️ Gemini API key is not configured."
+
+    for model_name in GEMINI_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [
+                {
+                    "parts": [
+                        { "text": f"{SYSTEM_KNOWLEDGE}\n\nUser ({user_name}) asks: {prompt}" }
+                    ]
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.7,
+                "maxOutputTokens": 300
+            }
+        }
+        try:
+            r = requests.post(url, json=payload, timeout=8)
+            if r.status_code == 200:
+                data = r.json()
+                text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                if text:
+                    return text.strip()
+        except Exception as e:
+            logging.warning(f"Gemini {model_name} attempt failed: {e}")
+            continue
+
+    return "⚠️ Sorry, I could not connect to Gemini right now. Please try again shortly!"
+
 # ── DISCORD BOT & UI ─────────────────────────────────────────────────────────
 intents = discord.Intents.default()
 intents.message_content = True
@@ -162,20 +259,19 @@ class WhitelistModal(discord.ui.Modal, title="Minecraft Whitelist"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        await handle_whitelist_request(interaction, self.ign_input.value, user=interaction.user)
+        await handle_whitelist_request(interaction, self.ign_input.value, user=interaction.user, guild=interaction.guild)
 
 class ServerControlView(discord.ui.View):
-    """Interactive Discord buttons for controlling or whitelisting on the server."""
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="🟢 Turn On Server", style=discord.ButtonStyle.success, custom_id="btn_start_server", emoji="⚡")
     async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await handle_start_request(interaction, user=interaction.user)
+        await handle_start_request(interaction, user=interaction.user, guild=interaction.guild)
 
     @discord.ui.button(label="📊 Server Status", style=discord.ButtonStyle.secondary, custom_id="btn_status_server", emoji="🔍")
     async def status_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await handle_status_request(interaction)
+        await handle_status_request(interaction, user=interaction.user, guild=interaction.guild)
 
     @discord.ui.button(label="📝 Whitelist Me", style=discord.ButtonStyle.primary, custom_id="btn_whitelist_server", emoji="🎟️")
     async def whitelist_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -204,8 +300,11 @@ class ServerBuilderBot(commands.Bot):
 bot = ServerBuilderBot(command_prefix=['!', '/', '.'], intents=intents, help_command=None)
 
 # ── REQUEST HANDLERS ─────────────────────────────────────────────────────────
-async def handle_status_request(interaction_or_ctx):
+async def handle_status_request(interaction_or_ctx, user=None, guild=None):
     is_inter = isinstance(interaction_or_ctx, discord.Interaction)
+    target_user = user or (interaction_or_ctx.user if is_inter else interaction_or_ctx.author)
+    target_guild = guild or (interaction_or_ctx.guild if is_inter else interaction_or_ctx.guild)
+
     if is_inter:
         if not interaction_or_ctx.response.is_done():
             try: await interaction_or_ctx.response.defer()
@@ -213,6 +312,15 @@ async def handle_status_request(interaction_or_ctx):
         reply_fn = interaction_or_ctx.followup.send if interaction_or_ctx.response.is_done() else interaction_or_ctx.response.send_message
     else:
         reply_fn = interaction_or_ctx.send
+
+    allowed, remain = check_cooldown(target_user, target_guild)
+    if not allowed:
+        await reply_fn(embed=discord.Embed(
+            title="⏳ Command Cooldown",
+            description=f"Please wait **{remain}s** before using another command.\n*(Admins and moderators have no cooldown)*",
+            color=0xF1C40F
+        ))
+        return
 
     is_online, desc, online_p, max_p, ver = await asyncio.to_thread(ping_minecraft_server, 2.5)
 
@@ -239,9 +347,11 @@ async def handle_status_request(interaction_or_ctx):
         embed.set_footer(text="Aalu Server Builder • Click below to play!")
         await reply_fn(embed=embed, view=ServerControlView())
 
-async def handle_start_request(interaction_or_ctx, user):
+async def handle_start_request(interaction_or_ctx, user, guild=None):
     global is_starting
     is_inter = isinstance(interaction_or_ctx, discord.Interaction)
+    target_guild = guild or (interaction_or_ctx.guild if is_inter else interaction_or_ctx.guild)
+
     if is_inter:
         if not interaction_or_ctx.response.is_done():
             try: await interaction_or_ctx.response.defer()
@@ -249,6 +359,15 @@ async def handle_start_request(interaction_or_ctx, user):
         reply_fn = interaction_or_ctx.followup.send if interaction_or_ctx.response.is_done() else interaction_or_ctx.response.send_message
     else:
         reply_fn = interaction_or_ctx.send
+
+    allowed, remain = check_cooldown(user, target_guild)
+    if not allowed:
+        await reply_fn(embed=discord.Embed(
+            title="⏳ Command Cooldown",
+            description=f"Please wait **{remain}s** before using another command.\n*(Admins and moderators have no cooldown)*",
+            color=0xF1C40F
+        ))
+        return
 
     is_online, desc, online_p, max_p, ver = await asyncio.to_thread(ping_minecraft_server, 1.5)
     if is_online:
@@ -308,7 +427,7 @@ async def handle_start_request(interaction_or_ctx, user):
             else:
                 embed_to = discord.Embed(
                     title="⏳ Server Boot is in Progress...",
-                    description=f"The server is taking longer than usual to boot.\nPlease try checking `/status` or connecting in 1 minute at `{SERVER_HOST}:{SERVER_PORT}`.",
+                    description=f"The server is booting up.\nCheck `/status` or connect in 1 minute at `{SERVER_HOST}:{SERVER_PORT}`.",
                     color=0xF1C40F
                 )
                 await reply_fn(embed=embed_to, view=ServerControlView())
@@ -322,8 +441,10 @@ async def handle_start_request(interaction_or_ctx, user):
         finally:
             is_starting = False
 
-async def handle_whitelist_request(interaction_or_ctx, ign: str, user):
+async def handle_whitelist_request(interaction_or_ctx, ign: str, user, guild=None, bypass_cooldown=False):
     is_inter = isinstance(interaction_or_ctx, discord.Interaction)
+    target_guild = guild or (interaction_or_ctx.guild if is_inter else interaction_or_ctx.guild)
+
     if is_inter:
         if not interaction_or_ctx.response.is_done():
             try: await interaction_or_ctx.response.defer()
@@ -332,11 +453,21 @@ async def handle_whitelist_request(interaction_or_ctx, ign: str, user):
     else:
         reply_fn = interaction_or_ctx.send
 
+    if not bypass_cooldown:
+        allowed, remain = check_cooldown(user, target_guild)
+        if not allowed:
+            await reply_fn(embed=discord.Embed(
+                title="⏳ Command Cooldown",
+                description=f"Please wait **{remain}s** before using another command.\n*(Admins and moderators have no cooldown)*",
+                color=0xF1C40F
+            ))
+            return
+
     if not ign:
         await reply_fn("❌ Usage: `/whitelist <your_minecraft_ign>` or `!whitelist <ign>`")
         return
 
-    clean_ign = ign.strip().replace('"', '').replace("'", '')
+    clean_ign = ign.strip().replace('"', '').replace("'", '').replace("`", "")
     if not re.match(r'^[a-zA-Z0-9_.* ]{3,20}$', clean_ign):
         embed_err = discord.Embed(
             title="❌ Invalid Minecraft Username",
@@ -384,19 +515,67 @@ async def handle_whitelist_request(interaction_or_ctx, ign: str, user):
 
     await reply_fn(embed=embed, view=ServerControlView())
 
+async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None):
+    """Processes user query with Gemini AI, supporting natural language whitelist requests."""
+    is_inter = isinstance(interaction_or_ctx, discord.Interaction)
+    target_guild = guild or (interaction_or_ctx.guild if is_inter else interaction_or_ctx.guild)
+
+    if is_inter:
+        if not interaction_or_ctx.response.is_done():
+            try: await interaction_or_ctx.response.defer()
+            except Exception: pass
+        reply_fn = interaction_or_ctx.followup.send if interaction_or_ctx.response.is_done() else interaction_or_ctx.response.send_message
+    else:
+        reply_fn = interaction_or_ctx.send
+
+    allowed, remain = check_cooldown(user, target_guild)
+    if not allowed:
+        await reply_fn(embed=discord.Embed(
+            title="⏳ Command Cooldown",
+            description=f"Please wait **{remain}s** before asking another question.\n*(Admins and moderators have no cooldown)*",
+            color=0xF1C40F
+        ))
+        return
+
+    # Call Gemini in thread
+    answer = await asyncio.to_thread(query_gemini, query, str(user))
+
+    # Check for Whitelist Intent
+    if "WHITELIST_INTENT:" in answer:
+        match = re.search(r'WHITELIST_INTENT:\s*([a-zA-Z0-9_.* ]{3,20})', answer)
+        if match:
+            extracted_ign = match.group(1).strip()
+            logging.info(f"[Gemini Whitelist] Extracted IGN: '{extracted_ign}' from user: {user}")
+            await handle_whitelist_request(interaction_or_ctx, extracted_ign, user, guild=target_guild, bypass_cooldown=True)
+            return
+
+    embed = discord.Embed(
+        title="🤖 Aalu AI Assistant",
+        description=answer,
+        color=0x9B59B6
+    )
+    embed.add_field(name="❓ Your Question", value=f"*{query[:250]}*", inline=False)
+    embed.set_footer(text="Aalu Server Builder • Ask anything about SMP or stream!")
+    await reply_fn(embed=embed, view=ServerControlView())
+
 # ── SLASH COMMANDS ───────────────────────────────────────────────────────────
+@bot.tree.command(name="ask", description="Ask anything about the Minecraft server, stream, or request whitelist in natural text!")
+@app_commands.describe(query="What would you like to ask or do? (e.g. 'whitelist me GamerX' or 'how to join SMP')")
+async def slash_ask(interaction: discord.Interaction, query: str):
+    await handle_ask_request(interaction, query, user=interaction.user, guild=interaction.guild)
+
 @bot.tree.command(name="start", description="Turn on the Minecraft server (anyone can use this!)")
 async def slash_start(interaction: discord.Interaction):
-    await handle_start_request(interaction, user=interaction.user)
+    await handle_start_request(interaction, user=interaction.user, guild=interaction.guild)
 
 @bot.tree.command(name="status", description="Check if the Minecraft server is online or offline")
 async def slash_status(interaction: discord.Interaction):
-    await handle_status_request(interaction)
+    await handle_status_request(interaction, user=interaction.user, guild=interaction.guild)
 
 @bot.tree.command(name="whitelist", description="Self-service: Whitelist your Minecraft IGN to join the Aalu SMP!")
 @app_commands.describe(ign="Your exact in-game Minecraft username (Java or Bedrock)")
 async def slash_whitelist(interaction: discord.Interaction, ign: str):
-    await handle_whitelist_request(interaction, ign, user=interaction.user)
+    await handle_whitelist_request(interaction, ign, user=interaction.user, guild=interaction.guild)
 
 @bot.tree.command(name="help", description="Show Minecraft server builder bot commands")
 async def slash_help(interaction: discord.Interaction):
@@ -405,24 +584,33 @@ async def slash_help(interaction: discord.Interaction):
         description="Commands to manage and play on the Minecraft server!",
         color=0x9B59B6
     )
+    embed.add_field(name="💬 Ask AI", value="`/ask <query>` - Ask about server, stream, or whitelist in natural text!", inline=False)
     embed.add_field(name="🚀 Turn On Server", value="`/start`, `!start`, or the green button below", inline=False)
     embed.add_field(name="📝 Join Whitelist", value="`/whitelist <ign>` or `!whitelist <ign>`", inline=False)
     embed.add_field(name="🔍 Check Status", value="`/status`, `!status`, or `!ip`", inline=False)
+    embed.add_field(name="⏱️ Cooldown", value="20s cooldown for members • **No cooldown** for Owner, Admins & Mods", inline=False)
     embed.set_footer(text="Aalu Server Builder • 24/7 Cloud Host")
     await interaction.response.send_message(embed=embed, view=ServerControlView())
 
 # ── TEXT COMMANDS ────────────────────────────────────────────────────────────
+@bot.command(name="ask", aliases=["ai", "question"])
+async def cmd_ask(ctx, *, query: str = None):
+    if not query:
+        await ctx.send("❌ Usage: `!ask <your question or whitelist request>`")
+        return
+    await handle_ask_request(ctx, query, user=ctx.author, guild=ctx.guild)
+
 @bot.command(name="start", aliases=["startserver", "turnon", "on"])
 async def cmd_start(ctx):
-    await handle_start_request(ctx, user=ctx.author)
+    await handle_start_request(ctx, user=ctx.author, guild=ctx.guild)
 
 @bot.command(name="status", aliases=["online", "server", "ip", "info"])
 async def cmd_status(ctx):
-    await handle_status_request(ctx)
+    await handle_status_request(ctx, user=ctx.author, guild=ctx.guild)
 
 @bot.command(name="whitelist", aliases=["wl", "addwhitelist"])
 async def cmd_whitelist(ctx, *, ign: str = None):
-    await handle_whitelist_request(ctx, ign, user=ctx.author)
+    await handle_whitelist_request(ctx, ign, user=ctx.author, guild=ctx.guild)
 
 @bot.command(name="help")
 async def cmd_help(ctx):
@@ -431,9 +619,11 @@ async def cmd_help(ctx):
         description="Commands to manage and play on the Minecraft server!",
         color=0x9B59B6
     )
+    embed.add_field(name="💬 Ask AI", value="`!ask <query>` or `/ask <query>`", inline=False)
     embed.add_field(name="🚀 Turn On Server", value="`!start` or `/start`", inline=False)
     embed.add_field(name="📝 Join Whitelist", value="`!whitelist <ign>` or `/whitelist <ign>`", inline=False)
     embed.add_field(name="🔍 Check Status", value="`!status` or `/status`", inline=False)
+    embed.add_field(name="⏱️ Cooldown", value="20s cooldown for members • **No cooldown** for Owner, Admins & Mods", inline=False)
     embed.set_footer(text="Aalu Server Builder • 24/7 Cloud Host")
     await ctx.send(embed=embed, view=ServerControlView())
 
@@ -444,9 +634,9 @@ async def on_interaction(interaction: discord.Interaction):
         if not interaction.response.is_done():
             custom_id = (interaction.data or {}).get("custom_id", "")
             if "start" in custom_id:
-                await handle_start_request(interaction, user=interaction.user)
+                await handle_start_request(interaction, user=interaction.user, guild=interaction.guild)
             elif "status" in custom_id:
-                await handle_status_request(interaction)
+                await handle_status_request(interaction, user=interaction.user, guild=interaction.guild)
             elif "whitelist" in custom_id:
                 await interaction.response.send_modal(WhitelistModal())
 
@@ -465,7 +655,6 @@ async def start_web_server():
     logging.info(f"✓ Health Check Web Server running on port {PORT}")
 
 async def render_keepalive_loop():
-    """Pings healthcheck every 10 mins so Render free tier never idles or sleeps."""
     await asyncio.sleep(30)
     while True:
         try:
@@ -479,23 +668,22 @@ async def render_keepalive_loop():
                         pass
         except Exception:
             pass
-        await asyncio.sleep(600)  # every 10 minutes
+        await asyncio.sleep(600)
 
 async def guardian_loop():
-    """Periodically verifies Minecraft server health and updates Discord activity."""
     await asyncio.sleep(10)
     while True:
         try:
             is_up, _, p_count, _, _ = await asyncio.to_thread(ping_minecraft_server, 2.0)
             if is_up:
-                activity = discord.Activity(type=discord.ActivityType.playing, name=f"Minecraft ({p_count}/50) | /start")
+                activity = discord.Activity(type=discord.ActivityType.playing, name=f"Minecraft ({p_count}/50) | /ask")
                 await bot.change_presence(status=discord.Status.online, activity=activity)
             else:
-                activity = discord.Activity(type=discord.ActivityType.listening, name="/start | legacy-7.hexacraft.fun")
+                activity = discord.Activity(type=discord.ActivityType.listening, name="/ask | legacy-7.hexacraft.fun")
                 await bot.change_presence(status=discord.Status.idle, activity=activity)
         except Exception:
             pass
-        await asyncio.sleep(1800)  # every 30 minutes
+        await asyncio.sleep(1800)
 
 @bot.event
 async def on_ready():
