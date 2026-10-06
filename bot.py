@@ -433,17 +433,17 @@ async def handle_status_request(interaction_or_ctx, user=None, guild=None):
 
     if is_inter:
         if not interaction_or_ctx.response.is_done():
-            try: await interaction_or_ctx.response.defer()
+            try: await interaction_or_ctx.response.defer(ephemeral=True)
             except Exception: pass
-        reply_fn = interaction_or_ctx.followup.send if interaction_or_ctx.response.is_done() else interaction_or_ctx.response.send_message
+        reply_fn = (lambda *a, **kw: interaction_or_ctx.followup.send(*a, ephemeral=True, **kw)) if interaction_or_ctx.response.is_done() else (lambda *a, **kw: interaction_or_ctx.response.send_message(*a, ephemeral=True, **kw))
     else:
         async def reply_fn(*args, **kwargs):
             try:
                 if hasattr(interaction_or_ctx, "reply"):
-                    return await interaction_or_ctx.reply(*args, **kwargs)
+                    return await interaction_or_ctx.reply(*args, delete_after=45, **kwargs)
             except Exception:
                 pass
-            return await interaction_or_ctx.send(*args, **kwargs)
+            return await interaction_or_ctx.send(*args, delete_after=45, **kwargs)
 
     allowed, remain = check_cooldown(target_user, target_guild)
     if not allowed:
@@ -486,17 +486,17 @@ async def handle_start_request(interaction_or_ctx, user, guild=None):
 
     if is_inter:
         if not interaction_or_ctx.response.is_done():
-            try: await interaction_or_ctx.response.defer()
+            try: await interaction_or_ctx.response.defer(ephemeral=True)
             except Exception: pass
-        reply_fn = interaction_or_ctx.followup.send if interaction_or_ctx.response.is_done() else interaction_or_ctx.response.send_message
+        reply_fn = (lambda *a, **kw: interaction_or_ctx.followup.send(*a, ephemeral=True, **kw)) if interaction_or_ctx.response.is_done() else (lambda *a, **kw: interaction_or_ctx.response.send_message(*a, ephemeral=True, **kw))
     else:
         async def reply_fn(*args, **kwargs):
             try:
                 if hasattr(interaction_or_ctx, "reply"):
-                    return await interaction_or_ctx.reply(*args, **kwargs)
+                    return await interaction_or_ctx.reply(*args, delete_after=45, **kwargs)
             except Exception:
                 pass
-            return await interaction_or_ctx.send(*args, **kwargs)
+            return await interaction_or_ctx.send(*args, delete_after=45, **kwargs)
 
     allowed, remain = check_cooldown(user, target_guild)
     if not allowed:
@@ -558,10 +558,7 @@ async def handle_start_request(interaction_or_ctx, user, guild=None):
                 embed_ready.add_field(name="☕ Java Connection", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
                 embed_ready.add_field(name="📱 Bedrock Connection", value=f"IP: `{SERVER_HOST}` | Port: `{SERVER_PORT}`", inline=False)
                 embed_ready.set_footer(text="Tillu • Have fun!")
-                if is_inter and interaction_or_ctx.channel:
-                    await interaction_or_ctx.channel.send(content=f"🔔 {user.mention} the Minecraft server is online!", embed=embed_ready, view=ServerControlView())
-                else:
-                    await reply_fn(embed=embed_ready, view=ServerControlView())
+                await reply_fn(embed=embed_ready, view=ServerControlView())
             else:
                 embed_to = discord.Embed(
                     title="⏳ Server Boot is in Progress...",
@@ -585,17 +582,17 @@ async def handle_whitelist_request(interaction_or_ctx, ign: str, user, guild=Non
 
     if is_inter:
         if not interaction_or_ctx.response.is_done():
-            try: await interaction_or_ctx.response.defer()
+            try: await interaction_or_ctx.response.defer(ephemeral=True)
             except Exception: pass
-        reply_fn = interaction_or_ctx.followup.send if interaction_or_ctx.response.is_done() else interaction_or_ctx.response.send_message
+        reply_fn = (lambda *a, **kw: interaction_or_ctx.followup.send(*a, ephemeral=True, **kw)) if interaction_or_ctx.response.is_done() else (lambda *a, **kw: interaction_or_ctx.response.send_message(*a, ephemeral=True, **kw))
     else:
         async def reply_fn(*args, **kwargs):
             try:
                 if hasattr(interaction_or_ctx, "reply"):
-                    return await interaction_or_ctx.reply(*args, **kwargs)
+                    return await interaction_or_ctx.reply(*args, delete_after=45, **kwargs)
             except Exception:
                 pass
-            return await interaction_or_ctx.send(*args, **kwargs)
+            return await interaction_or_ctx.send(*args, delete_after=45, **kwargs)
 
     if not bypass_cooldown:
         allowed, remain = check_cooldown(user, target_guild)
@@ -678,9 +675,9 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None):
 
     if is_inter:
         if not interaction_or_ctx.response.is_done():
-            try: await interaction_or_ctx.response.defer()
+            try: await interaction_or_ctx.response.defer(ephemeral=True)
             except Exception: pass
-        reply_fn = interaction_or_ctx.followup.send if interaction_or_ctx.response.is_done() else interaction_or_ctx.response.send_message
+        reply_fn = (lambda *a, **kw: interaction_or_ctx.followup.send(*a, ephemeral=True, **kw)) if interaction_or_ctx.response.is_done() else (lambda *a, **kw: interaction_or_ctx.response.send_message(*a, ephemeral=True, **kw))
     else:
         async def reply_fn(*args, **kwargs):
             try:
@@ -741,18 +738,29 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None):
             await handle_whitelist_request(interaction_or_ctx, extracted_ign, user, guild=target_guild, bypass_cooldown=True)
             return
 
-    # 3. Only show options/buttons when user EXPLICITLY typed server keywords in query
-    if should_show_server_options(query):
-        embed = discord.Embed(
-            title="🤖 Tillu",
-            description=answer,
-            color=0x9B59B6
-        )
-        embed.set_footer(text="Tillu • legacy-7.hexacraft.fun")
-        await reply_fn(embed=embed, view=ServerControlView())
+    # 3. Final output logic:
+    # - Slash Command Interaction -> Private Ephemeral reply (visible only to the user who ran it)
+    # - Prefix Command (!tillu) -> Auto-delete after 45s to avoid chat clutter
+    # - Normal chat in channel (on_message) -> Publicly visible as clean plain text, NO EMBEDS!
+    if is_inter:
+        if should_show_server_options(query):
+            embed = discord.Embed(
+                title="🤖 Tillu",
+                description=answer,
+                color=0x9B59B6
+            )
+            embed.set_footer(text="Tillu • legacy-7.hexacraft.fun")
+            await reply_fn(embed=embed, view=ServerControlView())
+        else:
+            await reply_fn(content=answer)
+    elif isinstance(interaction_or_ctx, commands.Context):
+        await reply_fn(content=answer, delete_after=45)
     else:
-        # Normal chat! Clean plain text without embed or buttons!
-        await reply_fn(content=answer)
+        # Normal chat in channel: Publicly visible clean plain text (NO EMBEDS!)
+        if hasattr(interaction_or_ctx, "channel"):
+            await interaction_or_ctx.channel.send(content=answer)
+        else:
+            await reply_fn(content=answer)
 
 # ── SLASH COMMANDS ───────────────────────────────────────────────────────────
 @bot.tree.command(name="ask", description="Ask Tillu anything about the server, stream, or request whitelist!")
@@ -780,7 +788,7 @@ async def slash_console(interaction: discord.Interaction, command: str):
         await interaction.response.send_message("🚫 Only Server Owner and Admins can execute console commands!", ephemeral=True)
         return
     ok, resp = await asyncio.to_thread(send_console_command, command)
-    await interaction.response.send_message(f"⚙️ **[Console]** Dispatched: `{command}`", ephemeral=False)
+    await interaction.response.send_message(f"⚙️ **[Console]** Dispatched: `{command}`", ephemeral=True)
 
 @bot.tree.command(name="ban", description="Owner/Admin only: Ban a player from the Minecraft server")
 @app_commands.describe(player="Minecraft player username", reason="Reason for ban")
@@ -789,7 +797,7 @@ async def slash_ban(interaction: discord.Interaction, player: str, reason: str =
         await interaction.response.send_message("🚫 Only Server Owner and Admins can ban players!", ephemeral=True)
         return
     await asyncio.to_thread(send_console_command, f"ban {player} {reason}")
-    await interaction.response.send_message(f"🔨 **[Banned]** `{player}` has been banned from the server! (Reason: {reason})")
+    await interaction.response.send_message(f"🔨 **[Banned]** `{player}` has been banned from the server! (Reason: {reason})", ephemeral=True)
 
 @bot.tree.command(name="unban", description="Owner/Admin only: Unban a player from the Minecraft server")
 @app_commands.describe(player="Minecraft player username")
@@ -798,7 +806,7 @@ async def slash_unban(interaction: discord.Interaction, player: str):
         await interaction.response.send_message("🚫 Only Server Owner and Admins can unban players!", ephemeral=True)
         return
     await asyncio.to_thread(send_console_command, f"pardon {player}")
-    await interaction.response.send_message(f"🕊️ **[Unbanned]** `{player}` has been pardoned.")
+    await interaction.response.send_message(f"🕊️ **[Unbanned]** `{player}` has been pardoned.", ephemeral=True)
 
 @bot.tree.command(name="unwhitelist", description="Owner/Admin only: Remove a player from the Minecraft whitelist")
 @app_commands.describe(player="Minecraft player username to remove")
@@ -813,7 +821,7 @@ async def slash_unwhitelist(interaction: discord.Interaction, player: str):
     reg = load_whitelist_registry()
     new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower() != clean_p.lower()}
     save_whitelist_registry(new_reg)
-    await interaction.response.send_message(f"🗑️ **[Whitelist Removed]** `{clean_p}` removed from whitelist.")
+    await interaction.response.send_message(f"🗑️ **[Whitelist Removed]** `{clean_p}` removed from whitelist.", ephemeral=True)
 
 @bot.tree.command(name="help", description="Show Tillu bot commands & features")
 async def slash_help(interaction: discord.Interaction):
@@ -829,7 +837,7 @@ async def slash_help(interaction: discord.Interaction):
     embed.add_field(name="👑 Admin Commands", value="`!c <cmd>`, `!ban <player>`, `!unban <player>`, `!kick <player>`, `!unwhitelist <player>`", inline=False)
     embed.add_field(name="⏱️ Cooldown", value="20s cooldown for members • **0s cooldown** for Owner, Admins & Mods", inline=False)
     embed.set_footer(text="Tillu • 24/7 Always-Online Active")
-    await interaction.response.send_message(embed=embed, view=ServerControlView())
+    await interaction.response.send_message(embed=embed, view=ServerControlView(), ephemeral=True)
 
 # ── TEXT COMMANDS ────────────────────────────────────────────────────────────
 @bot.command(name="tillu", aliases=["ask", "ai", "question"])
