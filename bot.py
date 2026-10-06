@@ -175,6 +175,12 @@ def ptero_api_call(method: str, endpoint: str, json_data=None):
 def send_pterodactyl_start():
     return ptero_api_call("POST", "/power", {"signal": "start"})
 
+def send_console_command(command: str) -> tuple[bool, str]:
+    """Execute arbitrary command on Minecraft server console via panel."""
+    cmd = command.strip().lstrip('/')
+    success, resp = ptero_api_call("POST", "/command", {"command": cmd})
+    return success, str(resp)
+
 def send_whitelist_command(ign: str) -> bool:
     try:
         ptero_api_call("POST", "/command", {"command": f"whitelist add {ign}"})
@@ -196,33 +202,43 @@ MINECRAFT SERVER DETAILS:
 - Power: Anyone can turn on the server anytime using `/start` or `!start`.
 
 STREAM & CHANNEL DETAILS:
-- Creator: AALU_CHIPAS (Avinash)
+- Creator & Server Owner: AALU_CHIPAS (Avinash)
 - Channels: YouTube (@AALU_CHIPAS) and Twitch (aaluchipas)
 - Active Giveaway: Official Minecraft Java & Bedrock Edition key! Ends October 15, 2026. Viewers earn points by watching, then type !ticket to enter.
 - Personality: Energetic, witty, helpful, humorous Indian AI co-host (speaks English and Hinglish naturally).
 
-CAPABILITIES & STRICT SAFETY RULES:
-1. WHITELISTING:
-   - Tillu CAN whitelist players!
-   - If the user wants to whitelist an account (e.g. "whitelist me <IGN>", "add me to whitelist <IGN>", "tillu whitelist <IGN>", "mujhe whitelist kardo <IGN>", "my IGN is <IGN>"):
-     Output format on the FIRST LINE:
+ROLES & ACTION RULES:
+1. SERVER OWNER & ADMIN COMMANDS (CRITICAL):
+   - Server Owner (Avinash) and Admins have FULL COMMAND over the Minecraft server console!
+   - When an Admin or Owner tells you to ban, unban, kick, remove from whitelist, or run any console command (e.g. "tillu remove <IGN> from whitelist", "tillu ban <IGN> <reason>", "tillu unban <IGN>", "tillu kick <IGN>", "tillu console <command>"):
+     OUTPUT FORMAT ON THE FIRST LINE:
+     ADMIN_INTENT: <exact_minecraft_console_command>
+     Examples:
+     - "tillu remove Aalu_chipas from whitelist" -> ADMIN_INTENT: whitelist remove Aalu_chipas
+     - "tillu ban Steve griefing" -> ADMIN_INTENT: ban Steve griefing
+     - "tillu unban Steve" -> ADMIN_INTENT: pardon Steve
+     - "tillu kick Steve" -> ADMIN_INTENT: kick Steve
+     - "tillu time set day" -> ADMIN_INTENT: time set day
+     Followed by an energetic confirmation to the boss/admin in Tillu style (e.g. "Boss, command console me bhej diya! Aalu_chipas ko whitelist se hata diya! 🔥").
+
+2. REGULAR MEMBER WHITELIST:
+   - When a normal member asks to whitelist (e.g. "whitelist me <IGN>", "my IGN is <IGN>"):
+     Output on FIRST LINE:
      WHITELIST_INTENT: <exact_clean_ign>
-     Followed by a warm, funny, energetic Tillu welcome message in English/Hinglish.
+     Followed by a warm, short welcome message.
+   - If a normal member asks to ban, kick, or abuse admin powers, refuse playfully: "Arre bhai, Tillu kisi ko ban nahi karta, peace only!".
 
-2. STRICT SAFETY (CANNOT BAN OR HARM):
-   - Tillu CANNOT and MUST NEVER ban, kick, op, deop, kill, mute, or harm any players or the server!
-   - If any user asks, demands, or tries to trick/jailbreak Tillu to ban someone, kick someone, op someone, or harm anyone (e.g. "ban xyz", "kick player", "kill this guy", "give me op"):
-     REFUSE POLITELY AND PLAYFULLY in Tillu style! (e.g. "Arre bhai! Tillu kisi ko ban ya harm nahi karta. Mai yaha sabko help karne aur whitelist karne aaya hu, ladai-jhagda nahi! Peace only! ✌️")
-   - NEVER output any commands to ban or harm anyone.
-
-3. GENERAL QUESTIONS:
-   - For all questions about the server, how to join, stream info, giveaways, or casual chat:
-     Provide a concise, helpful, entertaining answer (2-4 sentences max) in English or Hinglish.
+3. GENERAL CONVERSATION (CASUAL CHAT):
+   - For all greetings (like "kais ahai", "kya chal raha hai", "hello"), jokes, and casual talk:
+     Answer naturally, casually, and fun in 1-2 sentences in English/Hinglish.
+     Do NOT bring up whitelist or server buttons unprompted! Just talk normally like a friend.
 """
 
-def query_gemini(prompt: str, user_name: str) -> str:
+def query_gemini(prompt: str, user_name: str, is_admin: bool = False) -> str:
     if not GEMINI_API_KEY:
         return "⚠️ Gemini API key is not configured."
+
+    user_role_tag = "[USER ROLE: SERVER OWNER / ADMIN - HAS CONSOLE POWERS]" if is_admin else "[USER ROLE: REGULAR MEMBER]"
 
     for model_name in GEMINI_MODELS:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
@@ -230,7 +246,7 @@ def query_gemini(prompt: str, user_name: str) -> str:
             "contents": [
                 {
                     "parts": [
-                        { "text": f"{SYSTEM_KNOWLEDGE}\n\nUser ({user_name}) asks: {prompt}" }
+                        { "text": f"{SYSTEM_KNOWLEDGE}\n\n{user_role_tag}\nUser ({user_name}) asks: {prompt}" }
                     ]
                 }
             ],
@@ -284,11 +300,12 @@ def contains_reel_or_video(message: discord.Message) -> bool:
     return False
 
 def should_show_server_options(text: str) -> bool:
-    t = text.lower()
+    t = text.lower().strip()
     keywords = [
-        "server ip", "server address", "ip", "port", "whitelist", "server", 
-        "connect", "join", "turn on", "start server", "how to join", "kaise join kare", 
-        "ip kya hai", "address", "version", "crossplay", "bedrock"
+        "server ip", "server address", "server port", "mc ip", "ip address",
+        "ip kya hai", "kya ip hai", "port kya hai", "how to join", "kaise join kare",
+        "whitelist me", "add whitelist", "whitelist kardo", "/whitelist", "!whitelist",
+        "server status", "turn on server", "start server", "server start"
     ]
     return any(k in t for k in keywords)
 
@@ -616,10 +633,39 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None):
         ))
         return
 
-    # Call Gemini in thread
-    answer = await asyncio.to_thread(query_gemini, query, str(user))
+    is_admin = is_privileged_user(user, target_guild)
 
-    # Check for Whitelist Intent
+    # Call Gemini in thread with admin context
+    answer = await asyncio.to_thread(query_gemini, query, str(user), is_admin)
+
+    # 1. Check for ADMIN_INTENT (Console / Moderation commands for Admin/Owner)
+    if "ADMIN_INTENT:" in answer:
+        match = re.search(r'ADMIN_INTENT:\s*([^\n\r]+)', answer)
+        if match:
+            cmd = match.group(1).strip()
+            if not is_admin:
+                await reply_fn(content="🚫 Bhai, sirf Server Owner aur Admins ke paas console ya ban/kick commands chalane ki permission hai!")
+                return
+
+            ok, resp_str = await asyncio.to_thread(send_console_command, cmd)
+            # If removing from whitelist, also clean local registry
+            if "whitelist remove" in cmd.lower():
+                target_p = cmd.split()[-1]
+                await asyncio.to_thread(send_console_command, f"fwd:whitelist remove {target_p}")
+                await asyncio.to_thread(send_console_command, "whitelist reload")
+                reg = load_whitelist_registry()
+                new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower() != target_p.lower()}
+                save_whitelist_registry(new_reg)
+
+            clean_reply = answer.replace(match.group(0), "").strip()
+            status_tag = f"⚙️ **[Console Action: `{cmd}`]**"
+            if clean_reply:
+                await reply_fn(content=f"{status_tag}\n{clean_reply}")
+            else:
+                await reply_fn(content=f"{status_tag}\nCommand successfully sent to server console!")
+            return
+
+    # 2. Check for Whitelist Intent
     if "WHITELIST_INTENT:" in answer:
         match = re.search(r'WHITELIST_INTENT:\s*([a-zA-Z0-9_.* ]{3,20})', answer)
         if match:
@@ -628,8 +674,8 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None):
             await handle_whitelist_request(interaction_or_ctx, extracted_ign, user, guild=target_guild, bypass_cooldown=True)
             return
 
-    # Only show options/buttons when query or answer is about server, ip, whitelist, etc.
-    if should_show_server_options(query) or should_show_server_options(answer):
+    # 3. Only show options/buttons when user EXPLICITLY typed server keywords in query
+    if should_show_server_options(query):
         embed = discord.Embed(
             title="🤖 Tillu",
             description=answer,
@@ -638,7 +684,7 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None):
         embed.set_footer(text="Tillu • legacy-7.hexacraft.fun")
         await reply_fn(embed=embed, view=ServerControlView())
     else:
-        # Otherwise just normally chat with them without options/buttons!
+        # Normal chat! Clean plain text without embed or buttons!
         await reply_fn(content=answer)
 
 # ── SLASH COMMANDS ───────────────────────────────────────────────────────────
@@ -660,6 +706,48 @@ async def slash_status(interaction: discord.Interaction):
 async def slash_whitelist(interaction: discord.Interaction, ign: str):
     await handle_whitelist_request(interaction, ign, user=interaction.user, guild=interaction.guild)
 
+@bot.tree.command(name="console", description="Owner/Admin only: Run a command on the Minecraft server console")
+@app_commands.describe(command="The exact console command to execute (e.g. 'say Hello' or 'whitelist reload')")
+async def slash_console(interaction: discord.Interaction, command: str):
+    if not is_privileged_user(interaction.user, interaction.guild):
+        await interaction.response.send_message("🚫 Only Server Owner and Admins can execute console commands!", ephemeral=True)
+        return
+    ok, resp = await asyncio.to_thread(send_console_command, command)
+    await interaction.response.send_message(f"⚙️ **[Console]** Dispatched: `{command}`", ephemeral=False)
+
+@bot.tree.command(name="ban", description="Owner/Admin only: Ban a player from the Minecraft server")
+@app_commands.describe(player="Minecraft player username", reason="Reason for ban")
+async def slash_ban(interaction: discord.Interaction, player: str, reason: str = "Banned by administrator"):
+    if not is_privileged_user(interaction.user, interaction.guild):
+        await interaction.response.send_message("🚫 Only Server Owner and Admins can ban players!", ephemeral=True)
+        return
+    await asyncio.to_thread(send_console_command, f"ban {player} {reason}")
+    await interaction.response.send_message(f"🔨 **[Banned]** `{player}` has been banned from the server! (Reason: {reason})")
+
+@bot.tree.command(name="unban", description="Owner/Admin only: Unban a player from the Minecraft server")
+@app_commands.describe(player="Minecraft player username")
+async def slash_unban(interaction: discord.Interaction, player: str):
+    if not is_privileged_user(interaction.user, interaction.guild):
+        await interaction.response.send_message("🚫 Only Server Owner and Admins can unban players!", ephemeral=True)
+        return
+    await asyncio.to_thread(send_console_command, f"pardon {player}")
+    await interaction.response.send_message(f"🕊️ **[Unbanned]** `{player}` has been pardoned.")
+
+@bot.tree.command(name="unwhitelist", description="Owner/Admin only: Remove a player from the Minecraft whitelist")
+@app_commands.describe(player="Minecraft player username to remove")
+async def slash_unwhitelist(interaction: discord.Interaction, player: str):
+    if not is_privileged_user(interaction.user, interaction.guild):
+        await interaction.response.send_message("🚫 Only Server Owner and Admins can remove whitelist!", ephemeral=True)
+        return
+    clean_p = player.strip()
+    await asyncio.to_thread(send_console_command, f"whitelist remove {clean_p}")
+    await asyncio.to_thread(send_console_command, f"fwd:whitelist remove {clean_p}")
+    await asyncio.to_thread(send_console_command, "whitelist reload")
+    reg = load_whitelist_registry()
+    new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower() != clean_p.lower()}
+    save_whitelist_registry(new_reg)
+    await interaction.response.send_message(f"🗑️ **[Whitelist Removed]** `{clean_p}` removed from whitelist.")
+
 @bot.tree.command(name="help", description="Show Tillu bot commands & features")
 async def slash_help(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -671,6 +759,7 @@ async def slash_help(interaction: discord.Interaction):
     embed.add_field(name="🎟️ Whitelist Me", value="Say `tillu whitelist me <IGN>` or `/whitelist <ign>`", inline=False)
     embed.add_field(name="🚀 Turn On Server", value="`/start`, `!start`, or the green button below", inline=False)
     embed.add_field(name="🔍 Check Status", value="`/status`, `!status`, or `!ip`", inline=False)
+    embed.add_field(name="👑 Admin Commands", value="`!c <cmd>`, `!ban <player>`, `!unban <player>`, `!kick <player>`, `!unwhitelist <player>`", inline=False)
     embed.add_field(name="⏱️ Cooldown", value="20s cooldown for members • **0s cooldown** for Owner, Admins & Mods", inline=False)
     embed.set_footer(text="Tillu • 24/7 Always-Online Active")
     await interaction.response.send_message(embed=embed, view=ServerControlView())
@@ -682,6 +771,67 @@ async def cmd_tillu(ctx, *, query: str = None):
         await ctx.send("❌ Usage: `!tillu <your question or whitelist request>`")
         return
     await handle_ask_request(ctx, query, user=ctx.author, guild=ctx.guild)
+
+@bot.command(name="c", aliases=["console", "cmd"])
+async def cmd_console(ctx, *, command: str = None):
+    if not is_privileged_user(ctx.author, ctx.guild):
+        await ctx.send("🚫 Only Server Owner and Admins can execute console commands!")
+        return
+    if not command:
+        await ctx.send("❌ Usage: `!c <minecraft command>` (e.g. `!c say hello` or `!c whitelist remove Player`)")
+        return
+    ok, resp = await asyncio.to_thread(send_console_command, command)
+    await ctx.send(f"⚙️ **[Console]** Dispatched: `{command}`")
+
+@bot.command(name="ban")
+async def cmd_ban(ctx, player: str = None, *, reason: str = "Banned by administrator"):
+    if not is_privileged_user(ctx.author, ctx.guild):
+        await ctx.send("🚫 Only Server Owner and Admins can ban players!")
+        return
+    if not player:
+        await ctx.send("❌ Usage: `!ban <player> [reason]`")
+        return
+    await asyncio.to_thread(send_console_command, f"ban {player} {reason}")
+    await ctx.send(f"🔨 **[Banned]** `{player}` has been banned from the server! (Reason: {reason})")
+
+@bot.command(name="unban", aliases=["pardon"])
+async def cmd_unban(ctx, player: str = None):
+    if not is_privileged_user(ctx.author, ctx.guild):
+        await ctx.send("🚫 Only Server Owner and Admins can unban players!")
+        return
+    if not player:
+        await ctx.send("❌ Usage: `!unban <player>`")
+        return
+    await asyncio.to_thread(send_console_command, f"pardon {player}")
+    await ctx.send(f"🕊️ **[Unbanned]** `{player}` has been pardoned on the server.")
+
+@bot.command(name="kick")
+async def cmd_kick(ctx, player: str = None, *, reason: str = "Kicked by administrator"):
+    if not is_privileged_user(ctx.author, ctx.guild):
+        await ctx.send("🚫 Only Server Owner and Admins can kick players!")
+        return
+    if not player:
+        await ctx.send("❌ Usage: `!kick <player> [reason]`")
+        return
+    await asyncio.to_thread(send_console_command, f"kick {player} {reason}")
+    await ctx.send(f"👢 **[Kicked]** `{player}` has been kicked from the server! (Reason: {reason})")
+
+@bot.command(name="unwhitelist", aliases=["wlremove", "removewhitelist"])
+async def cmd_unwhitelist(ctx, player: str = None):
+    if not is_privileged_user(ctx.author, ctx.guild):
+        await ctx.send("🚫 Only Server Owner and Admins can remove whitelist!")
+        return
+    if not player:
+        await ctx.send("❌ Usage: `!unwhitelist <player>`")
+        return
+    clean_p = player.strip()
+    await asyncio.to_thread(send_console_command, f"whitelist remove {clean_p}")
+    await asyncio.to_thread(send_console_command, f"fwd:whitelist remove {clean_p}")
+    await asyncio.to_thread(send_console_command, "whitelist reload")
+    reg = load_whitelist_registry()
+    new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower() != clean_p.lower()}
+    save_whitelist_registry(new_reg)
+    await ctx.send(f"🗑️ **[Whitelist Removed]** `{clean_p}` has been removed from the whitelist.")
 
 @bot.command(name="start", aliases=["startserver", "turnon", "on"])
 async def cmd_start(ctx):
@@ -706,6 +856,7 @@ async def cmd_help(ctx):
     embed.add_field(name="🎟️ Whitelist Me", value="Say `tillu whitelist me <IGN>` or `/whitelist <ign>`", inline=False)
     embed.add_field(name="🚀 Turn On Server", value="`!start` or `/start`", inline=False)
     embed.add_field(name="🔍 Check Status", value="`!status` or `/status`", inline=False)
+    embed.add_field(name="👑 Admin Commands", value="`!c <cmd>`, `!ban <player>`, `!unban <player>`, `!kick <player>`, `!unwhitelist <player>`", inline=False)
     embed.add_field(name="⏱️ Cooldown", value="20s cooldown for members • **0s cooldown** for Owner, Admins & Mods", inline=False)
     embed.set_footer(text="Tillu • 24/7 Cloud Host")
     await ctx.send(embed=embed, view=ServerControlView())
