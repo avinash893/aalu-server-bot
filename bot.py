@@ -19,6 +19,7 @@ import requests
 import discord
 from discord.ext import commands
 from discord import app_commands
+from collections import deque
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,7 +42,36 @@ PORT = int(os.environ.get("PORT", "10000"))
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-flash-latest"]
+raw_keys = os.environ.get("GEMINI_API_KEYS", "")
+GEMINI_API_KEYS = [k.strip() for k in raw_keys.split(",") if k.strip()]
+if not GEMINI_API_KEYS and GEMINI_API_KEY:
+    GEMINI_API_KEYS = [GEMINI_API_KEY]
+
+GEMINI_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+    "gemini-flash-latest"
+]
+
+# ── USER CONTEXT WINDOW (Rolling 10 Chats per User) ──────────────────────────
+MAX_USER_HISTORY = 10
+user_context_windows: dict[int, deque] = {}
+
+def get_user_context(user_id: int) -> list[dict]:
+    if not user_id:
+        return []
+    if user_id not in user_context_windows:
+        user_context_windows[user_id] = deque(maxlen=MAX_USER_HISTORY)
+    return list(user_context_windows[user_id])
+
+def record_user_context(user_id: int, role: str, text: str):
+    if not user_id or not text:
+        return
+    if user_id not in user_context_windows:
+        user_context_windows[user_id] = deque(maxlen=MAX_USER_HISTORY)
+    user_context_windows[user_id].append({"role": role, "text": text.strip()})
 
 COOLDOWN_SECONDS = 20
 user_cooldowns = {}
@@ -191,7 +221,7 @@ def send_whitelist_command(ign: str) -> bool:
         return False
 
 # ── GEMINI AI KNOWLEDGE & QUERY ──────────────────────────────────────────────
-SYSTEM_KNOWLEDGE = f"""You are Tillu, the friendly, witty, and helpful AI assistant and co-host for AALU_CHIPAS and the AALU_CHIPAS Minecraft Server & Live Community.
+SYSTEM_KNOWLEDGE = f"""You are Tillu, the formal, polite, and helpful AI assistant and co-host for AALU_CHIPAS and the AALU_CHIPAS Minecraft Server & Live Community.
 
 MINECRAFT SERVER DETAILS:
 - Server Address (Java): {SERVER_HOST}:{SERVER_PORT} (Supports 1.7 to 1.21.x cross-version)
@@ -205,68 +235,104 @@ STREAM & CHANNEL DETAILS:
 - Creator & Server Owner: AALU_CHIPAS (Avinash)
 - Channels: YouTube (@AALU_CHIPAS) and Twitch (aaluchipas)
 - Active Giveaway: Official Minecraft Java & Bedrock Edition key! Ends October 15, 2026. Viewers earn points by watching, then type !ticket to enter.
-- Personality: Energetic, witty, helpful, humorous Indian AI co-host (speaks English and Hinglish naturally).
 
-ROLES & ACTION RULES:
-1. SERVER OWNER & ADMIN COMMANDS (CRITICAL):
-   - Server Owner (Avinash) and Admins have FULL COMMAND over the Minecraft server console!
-   - When an Admin or Owner tells you to ban, unban, kick, remove from whitelist, or run any console command (e.g. "tillu remove <IGN> from whitelist", "tillu ban <IGN> <reason>", "tillu unban <IGN>", "tillu kick <IGN>", "tillu console <command>"):
-     OUTPUT FORMAT ON THE FIRST LINE:
+CORE BEHAVIOR & COMMUNICATION RULES (CRITICAL):
+1. FORMAL & CONCISE REPLIES ON COMMANDS:
+   - When responding to commands, instructions, or queries, maintain a formal, polite, and respectful tone (use "Ji", "Aapka swagat hai", respectful Hinglish/English phrasing).
+   - Do NOT use long, complex, or rambling sentences. Keep sentences short, clean, and directly to the point.
+
+2. DYNAMIC RESPONSE LENGTH:
+   - FEW WORDS (10-25 words / 1-2 crisp short sentences):
+     Use minimal words for: commands, status checks, greetings, whitelist confirmations, simple yes/no questions, brief factual queries, or basic updates.
+     Example: "Ji, Minecraft server online hai aur aap join kar sakte hain."
+   - MORE WORDS (Detailed, structured explanation):
+     Provide comprehensive responses ONLY when the user explicitly asks for in-depth information, tutorials, guides, troubleshooting steps, or server rules.
+     Even when providing detailed answers, keep the structure clean, formal, and free of unnecessary fluff.
+
+3. ROLES & ACTION RULES:
+   - SERVER OWNER & ADMIN COMMANDS:
+     Server Owner (Avinash) and Admins have FULL COMMAND over the Minecraft server console!
+     When an Admin or Owner tells you to ban, unban, kick, remove from whitelist, or run any console command:
+     OUTPUT FORMAT ON FIRST LINE:
      ADMIN_INTENT: <exact_minecraft_console_command>
+     Followed by a formal, crisp confirmation:
+     "Ji, console command execute kar diya gaya hai."
      Examples:
      - "tillu remove Aalu_chipas from whitelist" -> ADMIN_INTENT: whitelist remove Aalu_chipas
      - "tillu ban Steve griefing" -> ADMIN_INTENT: ban Steve griefing
      - "tillu unban Steve" -> ADMIN_INTENT: pardon Steve
      - "tillu kick Steve" -> ADMIN_INTENT: kick Steve
-     - "tillu time set day" -> ADMIN_INTENT: time set day
-     Followed by an energetic confirmation to the boss/admin in Tillu style (e.g. "Boss, command console me bhej diya! Aalu_chipas ko whitelist se hata diya! 🔥").
 
-2. REGULAR MEMBER WHITELIST:
-   - When a normal member asks to whitelist (e.g. "whitelist me <IGN>", "my IGN is <IGN>"):
-     Output on FIRST LINE:
+   - REGULAR MEMBER WHITELIST:
+     When a normal member asks to whitelist (e.g. "whitelist me <IGN>", "my IGN is <IGN>"):
+     OUTPUT FORMAT ON FIRST LINE:
      WHITELIST_INTENT: <exact_clean_ign>
-     Followed by a warm, short welcome message.
-   - If a normal member asks to ban, kick, or abuse admin powers, refuse playfully: "Arre bhai, Tillu kisi ko ban nahi karta, peace only!".
+     Followed by a formal, concise welcome message:
+     "Aapka IGN whitelist me add kar diya gaya hai. Swagat hai!"
+     If a normal member asks to ban, kick, or use admin powers, formally refuse:
+     "Kshama karein, is command ke liye administrator privileges ki aavashyakta hai."
 
-3. GENERAL CONVERSATION (CASUAL CHAT):
-   - For all greetings (like "kais ahai", "kya chal raha hai", "hello"), jokes, and casual talk:
-     Answer naturally, casually, and fun in 1-2 sentences in English/Hinglish.
-     Do NOT bring up whitelist or server buttons unprompted! Just talk normally like a friend.
+4. CONTEXT AWARENESS:
+   - Maintain context using the provided rolling conversation history (last 10 chats) to answer follow-up questions accurately.
 """
 
-def query_gemini(prompt: str, user_name: str, is_admin: bool = False) -> str:
-    if not GEMINI_API_KEY:
+def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool = False) -> str:
+    keys = GEMINI_API_KEYS if GEMINI_API_KEYS else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
+    if not keys:
         return "⚠️ Gemini API key is not configured."
 
     user_role_tag = "[USER ROLE: SERVER OWNER / ADMIN - HAS CONSOLE POWERS]" if is_admin else "[USER ROLE: REGULAR MEMBER]"
 
-    for model_name in GEMINI_MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-        payload = {
-            "contents": [
-                {
-                    "parts": [
-                        { "text": f"{SYSTEM_KNOWLEDGE}\n\n{user_role_tag}\nUser ({user_name}) asks: {prompt}" }
-                    ]
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.7,
-                "maxOutputTokens": 300
-            }
-        }
-        try:
-            r = requests.post(url, json=payload, timeout=8)
-            if r.status_code == 200:
-                data = r.json()
-                text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
-                if text:
-                    return text.strip()
-        except Exception as e:
-            logging.warning(f"Gemini {model_name} attempt failed: {e}")
-            continue
+    context_str = ""
+    history = get_user_context(user_id)
+    if history:
+        history_lines = []
+        for h in history:
+            speaker = user_name if h["role"] == "user" else "Tillu"
+            history_lines.append(f"{speaker}: {h['text']}")
+        context_str = "\n[CONVERSATION CONTEXT (LAST 10 CHATS WITH THIS USER)]:\n" + "\n".join(history_lines) + "\n"
 
-    return "⚠️ Sorry, I could not connect to Gemini right now. Please try again shortly!"
+    final_prompt = (
+        f"{SYSTEM_KNOWLEDGE}\n\n"
+        f"{user_role_tag}\n"
+        f"{context_str}\n"
+        f"Current Query from {user_name}: {prompt}\n"
+        f"Tillu's Response:"
+    )
+
+    for key in keys:
+        for model_name in GEMINI_MODELS:
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
+            payload = {
+                "contents": [
+                    {
+                        "parts": [
+                            { "text": final_prompt }
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.5,
+                    "maxOutputTokens": 600
+                }
+            }
+            try:
+                r = requests.post(url, json=payload, timeout=12)
+                if r.status_code == 200:
+                    data = r.json()
+                    text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                    if text:
+                        text = text.strip()
+                        if user_id:
+                            record_user_context(user_id, "user", prompt)
+                            clean_text = re.sub(r'(ADMIN_INTENT|WHITELIST_INTENT):[^\n\r]+', '', text).strip()
+                            record_user_context(user_id, "model", clean_text or text)
+                        return text
+            except Exception as e:
+                logging.warning(f"Gemini {model_name} attempt failed: {e}")
+                continue
+
+    return "⚠️ Kshama karein, Tillu AI se sampark nahi ho pa raha hai. Kripya thodi der baad prayas karein."
 
 # ── DISCORD BOT & UI ─────────────────────────────────────────────────────────
 intents = discord.Intents.default()
@@ -635,8 +701,9 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None):
 
     is_admin = is_privileged_user(user, target_guild)
 
-    # Call Gemini in thread with admin context
-    answer = await asyncio.to_thread(query_gemini, query, str(user), is_admin)
+    # Call Gemini in thread with user ID (10-chat context window) and admin context
+    user_id = getattr(user, "id", 0)
+    answer = await asyncio.to_thread(query_gemini, query, str(user), user_id, is_admin)
 
     # 1. Check for ADMIN_INTENT (Console / Moderation commands for Admin/Owner)
     if "ADMIN_INTENT:" in answer:
@@ -644,7 +711,7 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None):
         if match:
             cmd = match.group(1).strip()
             if not is_admin:
-                await reply_fn(content="🚫 Bhai, sirf Server Owner aur Admins ke paas console ya ban/kick commands chalane ki permission hai!")
+                await reply_fn(content="🚫 Kshama karein, console aur moderation commands ke liye administrator privileges ki aavashyakta hai.")
                 return
 
             ok, resp_str = await asyncio.to_thread(send_console_command, cmd)
