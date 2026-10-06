@@ -76,6 +76,10 @@ def record_user_context(user_id: int, role: str, text: str):
 COOLDOWN_SECONDS = 20
 user_cooldowns = {}
 
+# ── ACTIVE CONVERSATION SESSION (Awake state) ───────────────────────────────
+CONVERSATION_TIMEOUT_SECONDS = 120
+ACTIVE_USER_CONVERSATIONS: dict[tuple[int, int], float] = {}
+
 WHITELIST_REGISTRY_PATH = os.path.join(os.path.dirname(__file__), "whitelist_registry.json")
 
 # ── COOLDOWN & PERMISSIONS ───────────────────────────────────────────────────
@@ -668,7 +672,7 @@ async def handle_whitelist_request(interaction_or_ctx, ign: str, user, guild=Non
 
     await reply_fn(embed=embed, view=ServerControlView())
 
-async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None):
+async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, bypass_cooldown: bool = False):
     """Processes user query with Gemini AI, supporting natural conversation and whitelist requests."""
     is_inter = isinstance(interaction_or_ctx, discord.Interaction)
     target_guild = guild or (interaction_or_ctx.guild if is_inter else interaction_or_ctx.guild)
@@ -687,14 +691,21 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None):
                 pass
             return await interaction_or_ctx.send(*args, **kwargs)
 
-    allowed, remain = check_cooldown(user, target_guild)
-    if not allowed:
-        await reply_fn(embed=discord.Embed(
-            title="⏳ Tillu is catching his breath!",
-            description=f"Please wait **{remain}s** before asking another question.\n*(Server Owner, Admins, and Mods have no cooldown)*",
-            color=0xF1C40F
-        ))
-        return
+    if not bypass_cooldown:
+        allowed, remain = check_cooldown(user, target_guild)
+        if not allowed:
+            cooldown_text = f"⏳ Tillu is catching his breath! Please wait **{remain}s** before asking another question."
+            if is_inter:
+                await reply_fn(embed=discord.Embed(
+                    title="⏳ Tillu is catching his breath!",
+                    description=f"Please wait **{remain}s** before asking another question.\n*(Server Owner, Admins, and Mods have no cooldown)*",
+                    color=0xF1C40F
+                ))
+            elif isinstance(interaction_or_ctx, commands.Context):
+                await reply_fn(content=cooldown_text, delete_after=15)
+            else:
+                await reply_fn(content=cooldown_text, delete_after=15)
+            return
 
     is_admin = is_privileged_user(user, target_guild)
 
@@ -1026,16 +1037,39 @@ async def on_message(message: discord.Message):
     # 2. Reply to a message sent by the bot
     # 3. Message contains "tillu" or "mr tillu"
     is_mentioned = bot.user in message.mentions if bot.user else False
-    is_reply = False
+    is_reply_to_bot = False
+    is_reply_to_other = False
     if message.reference and message.reference.resolved:
         resolved = message.reference.resolved
-        if isinstance(resolved, discord.Message) and bot.user and resolved.author.id == bot.user.id:
-            is_reply = True
+        if isinstance(resolved, discord.Message):
+            if bot.user and resolved.author.id == bot.user.id:
+                is_reply_to_bot = True
+            elif resolved.author.id != message.author.id:
+                is_reply_to_other = True
 
     content = message.content.strip()
-    match_tillu = bool(re.search(r'\b(tillu|mr\s*tillu)\b', content, re.IGNORECASE))
+    if not content:
+        return
 
-    if is_mentioned or is_reply or match_tillu:
+    match_tillu = bool(re.search(r'\b(tillu|mr\s*tillu)\b', content, re.IGNORECASE))
+    is_dismissal = bool(re.search(r'\b(bye|good\s*night|goodnight|tata|alvida|so\s*ja|shubh\s*ratri|stop\s*talking|chup\s*raho)\b', content, re.IGNORECASE))
+
+    session_key = (message.author.id, message.channel.id)
+    now = time.time()
+    is_active_session = False
+    if session_key in ACTIVE_USER_CONVERSATIONS:
+        if now - ACTIVE_USER_CONVERSATIONS[session_key] <= CONVERSATION_TIMEOUT_SECONDS:
+            is_active_session = True
+        else:
+            ACTIVE_USER_CONVERSATIONS.pop(session_key, None)
+
+    # CASE A: Explicit wake-up or message directed at Tillu
+    if is_mentioned or is_reply_to_bot or match_tillu:
+        if is_dismissal:
+            ACTIVE_USER_CONVERSATIONS.pop(session_key, None)
+        else:
+            ACTIVE_USER_CONVERSATIONS[session_key] = now
+
         # Clean query text
         query = content
         if bot.user:
@@ -1046,9 +1080,31 @@ async def on_message(message: discord.Message):
 
         try:
             async with message.channel.typing():
-                await handle_ask_request(message, query, user=message.author, guild=message.guild)
+                await handle_ask_request(message, query, user=message.author, guild=message.guild, bypass_cooldown=True)
         except Exception as e:
             logging.error(f"[on_message] Error handling natural query for Tillu: {e}")
+
+    # CASE B: Active conversation session (user asks follow-up questions without mentioning Tillu)
+    elif is_active_session:
+        # Ignore if user is replying to someone else or mentioning another user
+        has_other_mentions = any(m.id != (bot.user.id if bot.user else 0) for m in message.mentions)
+        if is_reply_to_other or has_other_mentions:
+            return
+
+        # Ignore bot prefix commands meant for other bots
+        if content.startswith(('!', '/', '.', '?', '-', '$', ';;', '>', ';', '~', '+', '=')):
+            return
+
+        if is_dismissal:
+            ACTIVE_USER_CONVERSATIONS.pop(session_key, None)
+        else:
+            ACTIVE_USER_CONVERSATIONS[session_key] = now
+
+        try:
+            async with message.channel.typing():
+                await handle_ask_request(message, content, user=message.author, guild=message.guild, bypass_cooldown=True)
+        except Exception as e:
+            logging.error(f"[on_message] Error handling active session follow-up for Tillu: {e}")
 
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
