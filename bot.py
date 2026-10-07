@@ -319,6 +319,7 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
         f"Tillu's Response:"
     )
 
+    last_err = "No Gemini response"
     for key in keys:
         for model_name in GEMINI_MODELS:
             url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
@@ -348,12 +349,14 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
                             record_user_context(user_id, "model", clean_text or text)
                         return text
                 else:
+                    last_err = f"{model_name} HTTP {r.status_code}: {r.text[:120]}"
                     logging.warning(f"Gemini {model_name} HTTP {r.status_code}: {r.text[:150]}")
             except Exception as e:
+                last_err = f"{model_name} {type(e).__name__}: {str(e)[:120]}"
                 logging.warning(f"Gemini {model_name} attempt failed: {e}")
                 continue
 
-    return "⚠️ Arre yaar, Tillu AI se connect nahi ho pa raha abhi. Thodi der me try kar!"
+    return f"⚠️ Arre yaar, Tillu AI se connect nahi ho pa raha abhi. ({last_err})"
 
 # ── DISCORD BOT & UI ─────────────────────────────────────────────────────────
 intents = discord.Intents.default()
