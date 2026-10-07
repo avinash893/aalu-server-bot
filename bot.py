@@ -66,11 +66,10 @@ if not GEMINI_API_KEYS and GEMINI_API_KEY:
     GEMINI_API_KEYS = [GEMINI_API_KEY]
 
 GEMINI_MODELS = [
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemini-flash-latest"
+    "gemini-3.5-flash",
+    "gemini-3.8-flash"
 ]
 
 # ── USER CONTEXT WINDOW (Rolling 10 Chats per User) ──────────────────────────
@@ -348,6 +347,8 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
                             clean_text = re.sub(r'(ADMIN_INTENT|WHITELIST_INTENT):[^\n\r]+', '', text).strip()
                             record_user_context(user_id, "model", clean_text or text)
                         return text
+                else:
+                    logging.warning(f"Gemini {model_name} HTTP {r.status_code}: {r.text[:150]}")
             except Exception as e:
                 logging.warning(f"Gemini {model_name} attempt failed: {e}")
                 continue
