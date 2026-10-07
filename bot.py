@@ -48,7 +48,7 @@ PTERO_URL = os.environ.get("PTERO_URL", "https://panel.hexacraft.fun")
 PTERO_KEY = os.environ.get("PTERO_KEY", "")
 PTERO_SERVER = os.environ.get("PTERO_SERVER", "14c2ebb6")
 PORT = int(os.environ.get("PORT", "10000"))
-RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
+RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://aalu-server-bot.onrender.com")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 raw_keys = os.environ.get("GEMINI_API_KEYS", "")
@@ -1154,7 +1154,7 @@ async def render_keepalive_loop():
                         pass
         except Exception:
             pass
-        await asyncio.sleep(600)
+        await asyncio.sleep(300)
 
 async def guardian_loop():
     await asyncio.sleep(10)
