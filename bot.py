@@ -21,6 +21,15 @@ from discord.ext import commands
 from discord import app_commands
 from collections import deque
 
+# Force UTF-8 output encoding across environments to avoid UnicodeEncodeError crashes
+try:
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass
+
 logging.basicConfig(
     level=logging.INFO,
     format='[%(asctime)s] [%(levelname)-8s] %(name)s: %(message)s',
@@ -1129,7 +1138,7 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    logging.info(f"✓ Health Check Web Server running on port {PORT}")
+    logging.info(f"[OK] Health Check Web Server running on port {PORT}")
 
 async def render_keepalive_loop():
     await asyncio.sleep(30)
@@ -1176,8 +1185,26 @@ async def on_ready():
     asyncio.create_task(render_keepalive_loop())
 
 async def main():
-    await start_web_server()
-    await bot.start(BOT_TOKEN)
+    try:
+        await start_web_server()
+    except Exception as we:
+        logging.error(f"[WebServer] Failed to start web server: {we}")
+
+    if not BOT_TOKEN:
+        logging.critical("[Fatal] BOT_TOKEN environment variable is not set!")
+        while True:
+            await asyncio.sleep(60)
+
+    while True:
+        try:
+            logging.info("[Bot] Connecting to Discord Gateway...")
+            await bot.start(BOT_TOKEN)
+        except (discord.LoginFailure, discord.PrivilegedIntentsRequired) as fatal_e:
+            logging.critical(f"[Bot] Fatal Discord auth error: {fatal_e}. Please verify BOT_TOKEN.")
+            await asyncio.sleep(60)
+        except Exception as e:
+            logging.error(f"[Bot] Discord error: {e}. Reconnecting in 10s...", exc_info=True)
+            await asyncio.sleep(10)
 
 if __name__ == "__main__":
     asyncio.run(main())
