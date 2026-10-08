@@ -53,6 +53,10 @@ SERVER_PORT = int(os.environ.get("SERVER_PORT", "25587"))
 PRIMARY_GUILD_ID = int(os.environ.get("PRIMARY_GUILD_ID", "1456298447979286541"))
 CS2_GUILD_ID = int(os.environ.get("CS2_GUILD_ID", "1530719250237362297"))
 
+CONSOLE_CHANNEL_ID = int(os.environ.get("CONSOLE_CHANNEL_ID", "1486114457674453083"))
+WHITELIST_CHANNEL_ID = int(os.environ.get("WHITELIST_CHANNEL_ID", "1511614214962151585"))
+CHAT_CHANNEL_ID = int(os.environ.get("CHAT_CHANNEL_ID", "1456299736326733998"))
+
 PTERO_URL = os.environ.get("PTERO_URL", "https://panel.hexacraft.fun")
 PTERO_KEY = os.environ.get("PTERO_KEY", "")
 PTERO_SERVER = os.environ.get("PTERO_SERVER", "14c2ebb6")
@@ -226,16 +230,70 @@ def ptero_api_call(method: str, endpoint: str, json_data=None):
 def send_pterodactyl_start():
     return ptero_api_call("POST", "/power", {"signal": "start"})
 
-def send_console_command(command: str) -> tuple[bool, str]:
-    """Execute arbitrary command on Minecraft server console via panel."""
+async def execute_server_command(command: str) -> tuple[bool, str]:
+    """Execute command directly via DiscordSRV console channel and fallback to panel."""
     cmd = command.strip().lstrip('/')
-    success, resp = ptero_api_call("POST", "/command", {"command": cmd})
-    return success, str(resp)
+    dispatched_console = False
+
+    # 1. Route directly into DiscordSRV console channel (#🎚️console)
+    try:
+        ch = bot.get_channel(CONSOLE_CHANNEL_ID)
+        if ch:
+            await ch.send(cmd)
+            dispatched_console = True
+            logging.info(f"[Console Dispatch] Sent `{cmd}` to #{ch.name} ({CONSOLE_CHANNEL_ID})")
+    except Exception as e:
+        logging.warning(f"[Console Dispatch] DiscordSRV channel send notice: {e}")
+
+    # 2. Also attempt Pterodactyl panel API
+    try:
+        ptero_ok, ptero_resp = await asyncio.to_thread(ptero_api_call, "POST", "/command", {"command": cmd})
+        if ptero_ok:
+            return True, str(ptero_resp)
+    except Exception as pe:
+        logging.warning(f"[Console Dispatch] Pterodactyl panel notice: {pe}")
+
+    if dispatched_console:
+        return True, f"Dispatched to <#{CONSOLE_CHANNEL_ID}>"
+    return False, "Failed to dispatch command"
+
+def send_console_command(command: str) -> tuple[bool, str]:
+    """Execute arbitrary command on Minecraft server console (sync wrapper)."""
+    cmd = command.strip().lstrip('/')
+    if bot and bot.loop and bot.loop.is_running():
+        try:
+            asyncio.run_coroutine_threadsafe(execute_server_command(cmd), bot.loop)
+            return True, f"Dispatched to <#{CONSOLE_CHANNEL_ID}>"
+        except Exception as e:
+            logging.error(f"[send_console_command] Coroutine scheduling notice: {e}")
+    p_ok, p_res = ptero_api_call("POST", "/command", {"command": cmd})
+    return p_ok, str(p_res)
+
+async def execute_whitelist_command(ign: str) -> bool:
+    """Execute whitelist commands for a player IGN across console and panel."""
+    clean_ign = ign.strip()
+    await execute_server_command(f"whitelist add {clean_ign}")
+    await execute_server_command(f"fwd:whitelist add {clean_ign}")
+    await execute_server_command("whitelist reload")
+    try:
+        wch = bot.get_channel(WHITELIST_CHANNEL_ID)
+        if wch:
+            await wch.send(f"🎟️ Whitelist registered: `{clean_ign}`")
+    except Exception:
+        pass
+    return True
 
 def send_whitelist_command(ign: str) -> bool:
+    clean_ign = ign.strip()
+    if bot and bot.loop and bot.loop.is_running():
+        try:
+            asyncio.run_coroutine_threadsafe(execute_whitelist_command(clean_ign), bot.loop)
+            return True
+        except Exception:
+            pass
     try:
-        ptero_api_call("POST", "/command", {"command": f"whitelist add {ign}"})
-        ptero_api_call("POST", "/command", {"command": f"fwd:whitelist add {ign}"})
+        ptero_api_call("POST", "/command", {"command": f"whitelist add {clean_ign}"})
+        ptero_api_call("POST", "/command", {"command": f"fwd:whitelist add {clean_ign}"})
         ptero_api_call("POST", "/command", {"command": "whitelist reload"})
         return True
     except Exception:
@@ -293,6 +351,10 @@ PERSONALITY & COMMUNICATION STYLE (CRITICAL):
 
 4. CONTEXT AWARENESS:
    - Remember the ongoing conversation context (last 10 chats) to answer follow-up questions seamlessly.
+
+5. LIVE SERVER TELEMETRY & STATUS:
+   - When users ask about server status, player count, who is online, or if the server is up, ALWAYS use the provided [LIVE REAL-TIME MINECRAFT STATUS] block.
+   - Answer accurately and enthusiastically in 1-2 punchy lines with the exact real-time player count and IP!
 """
 
 def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool = False) -> str:
@@ -300,7 +362,28 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
     if not keys:
         return "⚠️ Gemini API key is not configured."
 
-    user_role_tag = "[USER ROLE: SERVER OWNER / ADMIN - HAS CONSOLE POWERS]" if is_admin else "[USER ROLE: REGULAR MEMBER]"
+    user_role_tag = "[USER ROLE: SERVER OWNER / ADMIN / MODERATOR - HAS CONSOLE POWERS]" if is_admin else "[USER ROLE: REGULAR MEMBER]"
+
+    # Live server status query
+    try:
+        is_up, _, cur_players, max_players, ver_name = ping_minecraft_server(timeout=1.2)
+    except Exception:
+        is_up, cur_players, max_players, ver_name = False, 0, 50, "Paper 26.3"
+
+    if is_up:
+        live_telemetry = (
+            f"[LIVE REAL-TIME MINECRAFT STATUS: ONLINE]\n"
+            f"- Players Currently Online: {cur_players}/{max_players}\n"
+            f"- Server Version: {ver_name}\n"
+            f"- Server IP (Java & Bedrock): {SERVER_HOST}:{SERVER_PORT}\n"
+            f"If the user asks who is online, how many players are playing, or if server is up, use this exact live data!"
+        )
+    else:
+        live_telemetry = (
+            f"[LIVE REAL-TIME MINECRAFT STATUS: OFFLINE]\n"
+            f"- Server Address: {SERVER_HOST}:{SERVER_PORT}\n"
+            f"If the user asks, tell them the server is currently sleeping/offline, and they can turn it on with /start or !start!"
+        )
 
     context_str = ""
     history = get_user_context(user_id)
@@ -313,6 +396,7 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
 
     final_prompt = (
         f"{SYSTEM_KNOWLEDGE}\n\n"
+        f"{live_telemetry}\n\n"
         f"{user_role_tag}\n"
         f"{context_str}\n"
         f"Current Query from {user_name}: {prompt}\n"
@@ -563,10 +647,10 @@ async def handle_start_request(interaction_or_ctx, user, guild=None):
             embed_init.set_footer(text="Tillu • 24/7 Cloud Host")
             await reply_fn(embed=embed_init, view=ServerControlView())
 
-            await asyncio.to_thread(send_pterodactyl_start)
+            p_ok, p_res = await asyncio.to_thread(send_pterodactyl_start)
 
             ready = False
-            for _ in range(25):
+            for _ in range(20):
                 await asyncio.sleep(3)
                 is_up, _, cur_players, _, ver = await asyncio.to_thread(ping_minecraft_server, 2.0)
                 if is_up:
@@ -584,9 +668,12 @@ async def handle_start_request(interaction_or_ctx, user, guild=None):
                 embed_ready.set_footer(text="Tillu • Have fun!")
                 await reply_fn(embed=embed_ready, view=ServerControlView())
             else:
+                desc_note = f"The server is booting up.\nCheck `/status` or connect in 1 minute at `{SERVER_HOST}:{SERVER_PORT}`."
+                if not p_ok and ("Just a moment" in str(p_res) or "403" in str(p_res)):
+                    desc_note += "\n\n*(Note: Hexacraft panel has Cloudflare verification active. Server Owner Avinash can tap Start at [panel.hexacraft.fun](https://panel.hexacraft.fun))*"
                 embed_to = discord.Embed(
-                    title="⏳ Server Boot is in Progress...",
-                    description=f"The server is booting up.\nCheck `/status` or connect in 1 minute at `{SERVER_HOST}:{SERVER_PORT}`.",
+                    title="⏳ Server Boot Status",
+                    description=desc_note,
                     color=0xF1C40F
                 )
                 await reply_fn(embed=embed_to, view=ServerControlView())
@@ -668,7 +755,7 @@ async def handle_whitelist_request(interaction_or_ctx, ign: str, user, guild=Non
 
     applied_live = False
     try:
-        applied_live = await asyncio.to_thread(send_whitelist_command, clean_ign)
+        applied_live = await execute_whitelist_command(clean_ign)
     except Exception:
         pass
 
@@ -739,25 +826,26 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
         if match:
             cmd = match.group(1).strip()
             if not is_admin:
-                await reply_fn(content="🚫 Arre bhai, sirf Server Owner aur Admins ke paas console ya ban/kick commands chalane ki permission hai!")
+                await reply_fn(content="🚫 Arre bhai, sirf Server Owner, Admins aur Moderators ke paas console ya ban/kick commands chalane ki permission hai!")
                 return
 
-            ok, resp_str = await asyncio.to_thread(send_console_command, cmd)
+            ok, resp_str = await execute_server_command(cmd)
             # If removing from whitelist, also clean local registry
             if "whitelist remove" in cmd.lower():
                 target_p = cmd.split()[-1]
-                await asyncio.to_thread(send_console_command, f"fwd:whitelist remove {target_p}")
-                await asyncio.to_thread(send_console_command, "whitelist reload")
+                await execute_server_command(f"fwd:whitelist remove {target_p}")
+                await execute_server_command("whitelist reload")
                 reg = load_whitelist_registry()
                 new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower() != target_p.lower()}
                 save_whitelist_registry(new_reg)
 
             clean_reply = answer.replace(match.group(0), "").strip()
             status_tag = f"⚙️ **[Console Action: `{cmd}`]**"
+            channel_hint = f"\n*(Dispatched to <#{CONSOLE_CHANNEL_ID}> • Admins can also run commands directly in <#{CONSOLE_CHANNEL_ID}>)*"
             if clean_reply:
-                await reply_fn(content=f"{status_tag}\n{clean_reply}")
+                await reply_fn(content=f"{status_tag}\n{clean_reply}{channel_hint}")
             else:
-                await reply_fn(content=f"{status_tag}\nCommand successfully sent to server console!")
+                await reply_fn(content=f"{status_tag}\nCommand successfully dispatched to <#{CONSOLE_CHANNEL_ID}>!{channel_hint}")
             return
 
     # 2. Check for Whitelist Intent
@@ -812,47 +900,47 @@ async def slash_status(interaction: discord.Interaction):
 async def slash_whitelist(interaction: discord.Interaction, ign: str):
     await handle_whitelist_request(interaction, ign, user=interaction.user, guild=interaction.guild)
 
-@bot.tree.command(name="console", description="Owner/Admin only: Run a command on the Minecraft server console")
+@bot.tree.command(name="console", description="Owner/Admin/Mod only: Run a command on the Minecraft server console")
 @app_commands.describe(command="The exact console command to execute (e.g. 'say Hello' or 'whitelist reload')")
 async def slash_console(interaction: discord.Interaction, command: str):
     if not is_privileged_user(interaction.user, interaction.guild):
-        await interaction.response.send_message("🚫 Only Server Owner and Admins can execute console commands!", ephemeral=True)
+        await interaction.response.send_message("🚫 Only Server Owner, Admins, and Moderators can execute console commands!", ephemeral=True)
         return
-    ok, resp = await asyncio.to_thread(send_console_command, command)
-    await interaction.response.send_message(f"⚙️ **[Console]** Dispatched: `{command}`", ephemeral=True)
+    ok, resp = await execute_server_command(command)
+    await interaction.response.send_message(f"⚙️ **[Console Action: `{command}`]**\nDispatched to <#{CONSOLE_CHANNEL_ID}>! Check <#{CONSOLE_CHANNEL_ID}> for live execution.", ephemeral=True)
 
-@bot.tree.command(name="ban", description="Owner/Admin only: Ban a player from the Minecraft server")
+@bot.tree.command(name="ban", description="Owner/Admin/Mod only: Ban a player from the Minecraft server")
 @app_commands.describe(player="Minecraft player username", reason="Reason for ban")
 async def slash_ban(interaction: discord.Interaction, player: str, reason: str = "Banned by administrator"):
     if not is_privileged_user(interaction.user, interaction.guild):
-        await interaction.response.send_message("🚫 Only Server Owner and Admins can ban players!", ephemeral=True)
+        await interaction.response.send_message("🚫 Only Server Owner, Admins, and Moderators can ban players!", ephemeral=True)
         return
-    await asyncio.to_thread(send_console_command, f"ban {player} {reason}")
-    await interaction.response.send_message(f"🔨 **[Banned]** `{player}` has been banned from the server! (Reason: {reason})", ephemeral=True)
+    await execute_server_command(f"ban {player} {reason}")
+    await interaction.response.send_message(f"🔨 **[Banned]** `{player}` has been banned from the server! (Reason: {reason})\nDispatched to <#{CONSOLE_CHANNEL_ID}>.", ephemeral=True)
 
-@bot.tree.command(name="unban", description="Owner/Admin only: Unban a player from the Minecraft server")
+@bot.tree.command(name="unban", description="Owner/Admin/Mod only: Unban a player from the Minecraft server")
 @app_commands.describe(player="Minecraft player username")
 async def slash_unban(interaction: discord.Interaction, player: str):
     if not is_privileged_user(interaction.user, interaction.guild):
-        await interaction.response.send_message("🚫 Only Server Owner and Admins can unban players!", ephemeral=True)
+        await interaction.response.send_message("🚫 Only Server Owner, Admins, and Moderators can unban players!", ephemeral=True)
         return
-    await asyncio.to_thread(send_console_command, f"pardon {player}")
-    await interaction.response.send_message(f"🕊️ **[Unbanned]** `{player}` has been pardoned.", ephemeral=True)
+    await execute_server_command(f"pardon {player}")
+    await interaction.response.send_message(f"🕊️ **[Unbanned]** `{player}` has been pardoned.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.", ephemeral=True)
 
-@bot.tree.command(name="unwhitelist", description="Owner/Admin only: Remove a player from the Minecraft whitelist")
+@bot.tree.command(name="unwhitelist", description="Owner/Admin/Mod only: Remove a player from the Minecraft whitelist")
 @app_commands.describe(player="Minecraft player username to remove")
 async def slash_unwhitelist(interaction: discord.Interaction, player: str):
     if not is_privileged_user(interaction.user, interaction.guild):
-        await interaction.response.send_message("🚫 Only Server Owner and Admins can remove whitelist!", ephemeral=True)
+        await interaction.response.send_message("🚫 Only Server Owner, Admins, and Moderators can remove whitelist!", ephemeral=True)
         return
     clean_p = player.strip()
-    await asyncio.to_thread(send_console_command, f"whitelist remove {clean_p}")
-    await asyncio.to_thread(send_console_command, f"fwd:whitelist remove {clean_p}")
-    await asyncio.to_thread(send_console_command, "whitelist reload")
+    await execute_server_command(f"whitelist remove {clean_p}")
+    await execute_server_command(f"fwd:whitelist remove {clean_p}")
+    await execute_server_command("whitelist reload")
     reg = load_whitelist_registry()
     new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower() != clean_p.lower()}
     save_whitelist_registry(new_reg)
-    await interaction.response.send_message(f"🗑️ **[Whitelist Removed]** `{clean_p}` removed from whitelist.", ephemeral=True)
+    await interaction.response.send_message(f"🗑️ **[Whitelist Removed]** `{clean_p}` removed from whitelist.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.", ephemeral=True)
 
 @bot.tree.command(name="help", description="Show Tillu bot commands & features")
 async def slash_help(interaction: discord.Interaction):
@@ -866,6 +954,7 @@ async def slash_help(interaction: discord.Interaction):
     embed.add_field(name="🚀 Turn On Server", value="`/start`, `!start`, or the green button below", inline=False)
     embed.add_field(name="🔍 Check Status", value="`/status`, `!status`, or `!ip`", inline=False)
     embed.add_field(name="👑 Admin Commands", value="`!c <cmd>`, `!ban <player>`, `!unban <player>`, `!kick <player>`, `!unwhitelist <player>`", inline=False)
+    embed.add_field(name="🎚️ Live Server Console", value=f"Owner, Admins & Mods can type Minecraft commands directly in <#{CONSOLE_CHANNEL_ID}> anytime without visiting the website panel!", inline=False)
     embed.add_field(name="⏱️ Cooldown", value="20s cooldown for members • **0s cooldown** for Owner, Admins & Mods", inline=False)
     embed.set_footer(text="Tillu • 24/7 Always-Online Active")
     await interaction.response.send_message(embed=embed, view=ServerControlView(), ephemeral=True)
@@ -881,63 +970,63 @@ async def cmd_tillu(ctx, *, query: str = None):
 @bot.command(name="c", aliases=["console", "cmd"])
 async def cmd_console(ctx, *, command: str = None):
     if not is_privileged_user(ctx.author, ctx.guild):
-        await ctx.send("🚫 Only Server Owner and Admins can execute console commands!")
+        await ctx.send("🚫 Only Server Owner, Admins, and Moderators can execute console commands!")
         return
     if not command:
-        await ctx.send("❌ Usage: `!c <minecraft command>` (e.g. `!c say hello` or `!c whitelist remove Player`)")
+        await ctx.send(f"❌ Usage: `!c <minecraft command>` (e.g. `!c say hello` or `!c whitelist reload`)\n💡 Tip: You can also type directly in <#{CONSOLE_CHANNEL_ID}> without visiting the website panel!")
         return
-    ok, resp = await asyncio.to_thread(send_console_command, command)
-    await ctx.send(f"⚙️ **[Console]** Dispatched: `{command}`")
+    ok, resp = await execute_server_command(command)
+    await ctx.send(f"⚙️ **[Console Action: `{command}`]**\nDispatched to <#{CONSOLE_CHANNEL_ID}>! Check <#{CONSOLE_CHANNEL_ID}> for live execution.")
 
 @bot.command(name="ban")
 async def cmd_ban(ctx, player: str = None, *, reason: str = "Banned by administrator"):
     if not is_privileged_user(ctx.author, ctx.guild):
-        await ctx.send("🚫 Only Server Owner and Admins can ban players!")
+        await ctx.send("🚫 Only Server Owner, Admins, and Moderators can ban players!")
         return
     if not player:
         await ctx.send("❌ Usage: `!ban <player> [reason]`")
         return
-    await asyncio.to_thread(send_console_command, f"ban {player} {reason}")
-    await ctx.send(f"🔨 **[Banned]** `{player}` has been banned from the server! (Reason: {reason})")
+    await execute_server_command(f"ban {player} {reason}")
+    await ctx.send(f"🔨 **[Banned]** `{player}` has been banned from the server! (Reason: {reason})\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
 
 @bot.command(name="unban", aliases=["pardon"])
 async def cmd_unban(ctx, player: str = None):
     if not is_privileged_user(ctx.author, ctx.guild):
-        await ctx.send("🚫 Only Server Owner and Admins can unban players!")
+        await ctx.send("🚫 Only Server Owner, Admins, and Moderators can unban players!")
         return
     if not player:
         await ctx.send("❌ Usage: `!unban <player>`")
         return
-    await asyncio.to_thread(send_console_command, f"pardon {player}")
-    await ctx.send(f"🕊️ **[Unbanned]** `{player}` has been pardoned on the server.")
+    await execute_server_command(f"pardon {player}")
+    await ctx.send(f"🕊️ **[Unbanned]** `{player}` has been pardoned on the server.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
 
 @bot.command(name="kick")
 async def cmd_kick(ctx, player: str = None, *, reason: str = "Kicked by administrator"):
     if not is_privileged_user(ctx.author, ctx.guild):
-        await ctx.send("🚫 Only Server Owner and Admins can kick players!")
+        await ctx.send("🚫 Only Server Owner, Admins, and Moderators can kick players!")
         return
     if not player:
         await ctx.send("❌ Usage: `!kick <player> [reason]`")
         return
-    await asyncio.to_thread(send_console_command, f"kick {player} {reason}")
-    await ctx.send(f"👢 **[Kicked]** `{player}` has been kicked from the server! (Reason: {reason})")
+    await execute_server_command(f"kick {player} {reason}")
+    await ctx.send(f"👢 **[Kicked]** `{player}` has been kicked from the server!\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
 
 @bot.command(name="unwhitelist", aliases=["wlremove", "removewhitelist"])
 async def cmd_unwhitelist(ctx, player: str = None):
     if not is_privileged_user(ctx.author, ctx.guild):
-        await ctx.send("🚫 Only Server Owner and Admins can remove whitelist!")
+        await ctx.send("🚫 Only Server Owner, Admins, and Moderators can remove whitelist!")
         return
     if not player:
         await ctx.send("❌ Usage: `!unwhitelist <player>`")
         return
     clean_p = player.strip()
-    await asyncio.to_thread(send_console_command, f"whitelist remove {clean_p}")
-    await asyncio.to_thread(send_console_command, f"fwd:whitelist remove {clean_p}")
-    await asyncio.to_thread(send_console_command, "whitelist reload")
+    await execute_server_command(f"whitelist remove {clean_p}")
+    await execute_server_command(f"fwd:whitelist remove {clean_p}")
+    await execute_server_command("whitelist reload")
     reg = load_whitelist_registry()
     new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower() != clean_p.lower()}
     save_whitelist_registry(new_reg)
-    await ctx.send(f"🗑️ **[Whitelist Removed]** `{clean_p}` has been removed from the whitelist.")
+    await ctx.send(f"🗑️ **[Whitelist Removed]** `{clean_p}` has been removed from the whitelist.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
 
 @bot.command(name="start", aliases=["startserver", "turnon", "on"])
 async def cmd_start(ctx):
@@ -963,6 +1052,7 @@ async def cmd_help(ctx):
     embed.add_field(name="🚀 Turn On Server", value="`!start` or `/start`", inline=False)
     embed.add_field(name="🔍 Check Status", value="`!status` or `/status`", inline=False)
     embed.add_field(name="👑 Admin Commands", value="`!c <cmd>`, `!ban <player>`, `!unban <player>`, `!kick <player>`, `!unwhitelist <player>`", inline=False)
+    embed.add_field(name="🎚️ Live Server Console", value=f"Owner, Admins & Mods can type Minecraft commands directly in <#{CONSOLE_CHANNEL_ID}> anytime without visiting the website panel!", inline=False)
     embed.add_field(name="⏱️ Cooldown", value="20s cooldown for members • **0s cooldown** for Owner, Admins & Mods", inline=False)
     embed.set_footer(text="Tillu • 24/7 Cloud Host")
     await ctx.send(embed=embed, view=ServerControlView())
