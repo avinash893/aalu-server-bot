@@ -1,12 +1,10 @@
 {
-  "updated_at": "2026-10-09T16:54:23Z",
-  "count": 1,
-  "memories": {
-    "minecraft_server_ip": {
-      "topic": "minecraft_server_ip",
-      "content": "Server Address is legacy-7.hexacraft.fun:25587 (Port 25587 for both Java and Bedrock).",
-      "updated_by": "Avinash shah",
-      "updated_at": "2026-10-09 16:54:23 UTC"
+  "memories": [
+    {
+      "id": 1,
+      "fact": "Server Owner is Avinash (AALU_CHIPAS). Ultimate Boss.",
+      "added_by": "System",
+      "status": "approved"
     }
-  }
+  ]
 }
