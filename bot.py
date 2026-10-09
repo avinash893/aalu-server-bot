@@ -70,7 +70,10 @@ if not GEMINI_API_KEYS and GEMINI_API_KEY:
     GEMINI_API_KEYS = [GEMINI_API_KEY]
 
 GEMINI_MODELS = [
-    "gemini-3.5-flash"
+    "gemini-flash-latest",
+    "gemini-flash-lite-latest",
+    "gemini-3.5-flash",
+    "gemini-3-flash-preview"
 ]
 
 # ── USER CONTEXT WINDOW (Rolling 10 Chats per User) ──────────────────────────
@@ -517,7 +520,7 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
                 }
             }
             try:
-                r = requests.post(url, json=payload, timeout=18)
+                r = requests.post(url, json=payload, timeout=8)
                 if r.status_code == 200:
                     data = r.json()
                     text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
@@ -535,6 +538,31 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
                 last_err = f"{model_name} {type(e).__name__}: {str(e)[:120]}"
                 logging.warning(f"Gemini {model_name} attempt failed: {e}")
                 continue
+
+    # ── SMART LOCAL FALLBACK (Runs if all Gemini models/keys are temporarily busy) ──
+    lower_p = prompt.lower()
+    # 1. Whitelist query
+    if any(w in lower_p for w in ["whitelist", "wl", "white list"]):
+        return "🎟️ **Whitelist Instructions:**\nApna Minecraft in-game name (IGN) yahan likh kar bhej do (e.g. `!whitelist <IGN>` ya direct apna IGN chat me type kar do), Tillu aapko turant whitelist kar dega! 🚀"
+
+    # 2. Player count / who is playing query
+    if any(w in lower_p for w in ["kitne log", "players", "online", "khel", "status", "who is playing", "active"]):
+        try:
+            is_up, _, cur, m_max, ver = ping_minecraft_server(timeout=1.5)
+            if is_up:
+                return f"🟢 **Server Online hai!** Abhi **{cur}/{m_max}** players khel rahe hain. IP: `{SERVER_HOST}:{SERVER_PORT}` 🚀"
+            else:
+                return f"💤 Server abhi sleeping/offline hai. Start karne ke liye `/start` use karo ya panel link se chalu kar lo!"
+        except Exception:
+            return f"🎮 Server Address: `{SERVER_HOST}:{SERVER_PORT}` (Paper cross-version supported)."
+
+    # 3. IP / Port / How to join query
+    if any(w in lower_p for w in ["ip", "port", "join", "address", "version", "kaise join"]):
+        return f"🎮 **Server Address:**\n• Java Edition: `{SERVER_HOST}:{SERVER_PORT}` (1.7 se 1.21.x supported)\n• Bedrock / PE / Mobile: IP: `{SERVER_HOST}` | Port: `{SERVER_PORT}`"
+
+    # 4. Start server query
+    if any(w in lower_p for w in ["start", "chalu", "on kar", "boot"]):
+        return f"START_INTENT: start\nBhai server start karne ke liye HexaCraft panel pe jao aur **Start** daba do: https://panel.hexacraft.fun/server/14c2ebb6 🚀"
 
     return f"⚠️ Arre yaar, Tillu AI se connect nahi ho pa raha abhi. ({last_err})"
 
@@ -1301,8 +1329,11 @@ async def on_message(message: discord.Message):
         except Exception as e:
             logging.error(f"[Whitelist Channel Query] Error: {e}")
 
-    # CASE A: Explicit wake-up or message directed at Tillu
-    if is_mentioned or is_reply_to_bot or match_tillu:
+    # Check if message is a general Minecraft / server query (e.g. whitelist, IP, player count, start)
+    is_server_query = bool(re.search(r'\b(whitelist|white list|ip|port|kitne log|khel rhe|khel rahe|online hai|server on|server off|start server|how to join|kaise join)\b', content, re.IGNORECASE))
+
+    # CASE A: Explicit wake-up, message directed at Tillu, or direct server question
+    if is_mentioned or is_reply_to_bot or match_tillu or is_server_query:
         if is_dismissal:
             ACTIVE_USER_CONVERSATIONS.pop(session_key, None)
         else:
