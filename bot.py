@@ -70,9 +70,7 @@ if not GEMINI_API_KEYS and GEMINI_API_KEY:
     GEMINI_API_KEYS = [GEMINI_API_KEY]
 
 GEMINI_MODELS = [
-    "gemini-3.1-flash-lite",
-    "gemini-3.5-flash",
-    "gemini-flash-latest"
+    "gemini-3.5-flash"
 ]
 
 # ── USER CONTEXT WINDOW (Rolling 10 Chats per User) ──────────────────────────
@@ -452,28 +450,18 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
     except Exception:
         is_up, cur_players, max_players, ver_name = False, 0, 50, "Paper 26.3"
 
-    p_telemetry = ""
-    try:
-        p_status = panel_get_status()
-        if p_status:
-            p_telemetry = f"- Panel State: {p_status.get('status', 'unknown')} (RAM: {p_status.get('ram_mb', 0)}MB, CPU: {p_status.get('cpu_%', 0)}%)\n"
-    except Exception:
-        pass
-
     if is_up:
         live_telemetry = (
             f"[LIVE REAL-TIME MINECRAFT STATUS: ONLINE]\n"
             f"- Players Currently Online: {cur_players}/{max_players}\n"
             f"- Server Version: {ver_name}\n"
             f"- Server IP (Java & Bedrock): {SERVER_HOST}:{SERVER_PORT}\n"
-            f"{p_telemetry}"
             f"If the user asks who is online, how many players are playing, or if server is up, use this exact live data!"
         )
     else:
         live_telemetry = (
             f"[LIVE REAL-TIME MINECRAFT STATUS: OFFLINE / SLEEPING]\n"
             f"- Server Address: {SERVER_HOST}:{SERVER_PORT}\n"
-            f"{p_telemetry}"
             f"If the user asks, tell them the server is sleeping/offline, and they can ask you to start it or use /start!"
         )
 
