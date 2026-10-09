@@ -1231,6 +1231,33 @@ async def on_message(message: discord.Message):
         else:
             ACTIVE_USER_CONVERSATIONS.pop(session_key, None)
 
+    # SPECIAL CASE: Whitelist channel dedicated listener (Tillu ALWAYS reads and replies to every message here!)
+    is_whitelist_channel = (
+        message.channel.id == WHITELIST_CHANNEL_ID
+        or "whitelist" in getattr(message.channel, "name", "").lower()
+    )
+
+    if is_whitelist_channel:
+        clean_word = content.strip().replace('"', '').replace("'", "").replace("`", "")
+        # If user just typed an IGN directly (e.g. "Notch", "Steve_123", ".BedrockUser")
+        if (
+            re.match(r'^[a-zA-Z0-9_.*]{3,20}$', clean_word)
+            and not any(w in clean_word.lower() for w in ["hi", "hey", "hello", "tillu", "help", "kya", "kaise", "what", "bro", "bhai", "join"])
+        ):
+            try:
+                await handle_whitelist_request(message, clean_word, user=message.author, guild=message.guild, bypass_cooldown=True)
+                return
+            except Exception as e:
+                logging.error(f"[Whitelist Channel IGN] Error: {e}")
+
+        # Otherwise process naturally through Tillu AI with zero cooldown
+        try:
+            async with message.channel.typing():
+                await handle_ask_request(message, content, user=message.author, guild=message.guild, bypass_cooldown=True)
+            return
+        except Exception as e:
+            logging.error(f"[Whitelist Channel Query] Error: {e}")
+
     # CASE A: Explicit wake-up or message directed at Tillu
     if is_mentioned or is_reply_to_bot or match_tillu:
         if is_dismissal:
