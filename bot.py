@@ -517,7 +517,7 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
                 }
             }
             try:
-                r = requests.post(url, json=payload, timeout=10)
+                r = requests.post(url, json=payload, timeout=18)
                 if r.status_code == 200:
                     data = r.json()
                     text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
