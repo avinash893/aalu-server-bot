@@ -407,7 +407,7 @@ PERSONALITY & COMMUNICATION STYLE (CRITICAL):
      OUTPUT FORMAT ON FIRST LINE:
      START_INTENT: start
      Followed by an energetic confirmation redirecting them to the panel:
-     "Bhai server start karne ke liye HexaCraft panel pe jao aur **Start** daba do: https://panel.hexacraft.fun/server/14c2ebb6 🚀 (Aur har 30 minute me server auto-start bhi hota hai!)"
+     "Bhai server start karne ke liye HexaCraft panel pe jao aur **Start** daba do: https://panel.hexacraft.fun/server/14c2ebb6 🚀 (Aur har 10 minute me server auto-start bhi hota hai!)"
 
    - SERVER OWNER & ADMIN COMMANDS:
      Server Owner (Avinash) and Admins have FULL COMMAND over the Minecraft server console!
@@ -727,7 +727,7 @@ async def handle_start_request(interaction_or_ctx, user, guild=None):
         description=(
             f"Bas ek click me server start karo! Neeche link button se HexaCraft panel open karo aur **Start** click karo:\n\n"
             f"🔗 **Direct Panel URL**: [HexaCraft Panel]({panel_link})\n\n"
-            f"*(💡 Note: Server par 30-minute auto-keepalive schedule bhi active hai, toh server auto-restart hota rahega!)*"
+            f"*(💡 Note: Server par 10-minute auto-keepalive schedule bhi active hai, toh server auto-restart hota rahega!)*"
         ),
         color=0x3498DB
     )
