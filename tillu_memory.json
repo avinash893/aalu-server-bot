@@ -1,12 +1,18 @@
 {
-  "updated_at": "2026-10-09T17:08:21Z",
-  "count": 1,
+  "updated_at": "2026-10-09T17:13:56Z",
+  "count": 2,
   "memories": {
     "server_owner_is_avinash_aalu": {
       "topic": "server_owner_is_avinash_aalu",
       "content": "Server Owner is Avinash (AALU_CHIPAS). Ultimate Boss.",
       "updated_by": "System",
       "updated_at": "2026-10-09 17:08:21 UTC"
+    },
+    "sarcastic_roast_rule": {
+      "topic": "sarcastic_roast_rule",
+      "content": "Aaj se jo gaali dega, usko wahi sarcastic tareeqe se pelna hai par ban na ho jaye!",
+      "updated_by": "avinashshah (Owner)",
+      "updated_at": "2026-10-09 17:13:56 UTC"
     }
   }
 }
