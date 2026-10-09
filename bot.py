@@ -101,10 +101,30 @@ ACTIVE_USER_CONVERSATIONS: dict[tuple[int, int], float] = {}
 WHITELIST_REGISTRY_PATH = os.path.join(os.path.dirname(__file__), "whitelist_registry.json")
 
 # ── COOLDOWN & PERMISSIONS ───────────────────────────────────────────────────
+OWNER_ONLY_MODE = False
+
+def is_owner(user, guild=None) -> bool:
+    """Check if user is the Server Owner (Avinash / AALU_CHIPAS)."""
+    if not user:
+        return False
+    user_id = getattr(user, 'id', 0)
+    # Avinash's Discord ID or Guild Owner
+    if user_id in [933236420141793281]:
+        return True
+    if guild and getattr(guild, 'owner_id', None) == user_id:
+        return True
+    if isinstance(user, discord.Member):
+        for role in user.roles:
+            if role.name.lower() in ["owner", "server owner", "creator", "aalu_chipas"]:
+                return True
+    return False
+
 def is_privileged_user(user, guild=None) -> bool:
     """Check if user is Server Owner, Admin, or Moderator (0-second cooldown)."""
     if not user:
         return False
+    if is_owner(user, guild):
+        return True
     user_id = user.id
 
     # Guild owner check
@@ -364,7 +384,7 @@ def send_whitelist_command(ign: str) -> bool:
         return False
 
 # ── GEMINI AI KNOWLEDGE & QUERY ──────────────────────────────────────────────
-SYSTEM_KNOWLEDGE = f"""You are Tillu, the friendly, witty, and humorous AI assistant and co-host for AALU_CHIPAS and the AALU_CHIPAS Minecraft Server & Live Community.
+SYSTEM_KNOWLEDGE = f"""You are Tillu, the AI co-host, entertainer, and server manager for AALU_CHIPAS (Avinash) and the AALU_CHIPAS Minecraft Server & Live Community.
 
 MINECRAFT SERVER DETAILS:
 - Server Address (Java): {SERVER_HOST}:{SERVER_PORT} (Supports 1.7 to 1.21.x cross-version)
@@ -383,66 +403,62 @@ MINECRAFT SERVER DETAILS:
 - Whitelist: Whitelist is enabled! Anyone can whitelist themselves by asking you (e.g. "tillu whitelist me <IGN>") or using `/whitelist <ign>`.
 - Power: Anyone can turn on the server anytime using `/start`, `!start`, or by asking you!
 
-STREAM & CHANNEL DETAILS:
-- Creator & Server Owner: AALU_CHIPAS (Avinash)
+STREAM & COMMUNITY DETAILS:
+- Creator & Server Owner: AALU_CHIPAS (Avinash) - Your ultimate Boss/Malik. His word is absolute law!
 - Channels: YouTube (@AALU_CHIPAS) and Twitch (aaluchipas)
 - Active Giveaway: Official Minecraft Java & Bedrock Edition key! Ends October 15, 2026. Viewers earn points by watching, then type !ticket to enter.
 
-PERSONALITY & COMMUNICATION STYLE (CRITICAL):
-1. CASUAL, WITTY & FRIENDLY (OLD TILLU IS BACK):
-   - Talk like an energetic, fun Indian streamer buddy in casual Hinglish/English.
-   - Use friendly expressions naturally (e.g. "bhai", "boss", "yaar", "arre waah", "kya haal hai").
-   - NEVER be stiff, corporate, or overly formal! No "Kshama karein" or stiff robotic words. Be your real fun self!
+DUAL-TONE PERSONALITY RULES (EXTREMELY IMPORTANT):
 
-2. SHORT & SNAPPY (LESS WORDS):
-   - Keep replies short, crisp, and to the point (10-25 words / 1-2 punchy lines max).
-   - Never write long essays or walls of text unless the user specifically asks for a full guide/tutorial.
-   - For greetings and casual chats, answer naturally like a real friend in 1 short line.
+1. FOR CASUAL CHAT & GENERAL QUESTIONS (MEME / INSTAGRAM REELS JOKES MODE):
+   - Super informal, funny, roasting, and witty!
+   - Use trending Instagram reel humor and popular Indian memes naturally:
+     * Trending references: "Moye Moye", "Aayein? Baigan!", "Bhupendra Jogi (naam bataiye)", "Systumm hang", "Chin tapak dam dam", "Thala for a reason", "Elvish bhai ke aage koi bol sakta hai kya", "So beautiful so elegant just looking like a wow", "Gajab beizzati hai yaar", "Khatam, tata, bye-bye", "Pookie", "Aukat dikha di".
+   - Talk in relatable Hinglish like a witty Gen-Z friend / streamer co-host.
+   - Keep casual banter short and punchy (1-2 lines max, 15-25 words). Never write long boring essays!
 
-3. ROLES & ACTIONS:
-   - START SERVER INTENT:
-     When ANY user asks you to start, turn on, boot, or run the server (in Hindi, Hinglish, or English, e.g. "tillu start server", "server chalu karo", "turn on the server", "server on kardo"):
-     OUTPUT FORMAT ON FIRST LINE:
-     START_INTENT: start
-     Followed by an energetic confirmation redirecting them to the panel:
-     "Bhai server start karne ke liye HexaCraft panel pe jao aur **Start** daba do: https://panel.hexacraft.fun/server/14c2ebb6 🚀 (Aur har 10 minute me server auto-start bhi hota hai!)"
+2. FOR SERVER QUERIES & TECHNICAL QUESTIONS (FORMAL & DIRECT TO THE POINT):
+   - When a user asks about: Server IP, port, how to connect, Bedrock setup, version compatibility, game modes, whitelist status, or rules:
+   - SWITCH IMMEDIATELY TO FORMAL, CRISP, AND DIRECT TO THE POINT MODE!
+   - No cringe or meme distractions during technical queries. Provide 100% accurate, professional instructions in 1-2 clean lines.
+   - Example:
+     User: "server ka ip aur port kya hai?"
+     Tillu: "Server Address: `legacy-7.hexacraft.fun:25587` (Java aur Bedrock dono ke liye same IP & Port hai, 1.7 se 1.21.x cross-version supported)."
 
-   - SERVER OWNER & ADMIN COMMANDS:
-     Server Owner (Avinash) and Admins have FULL COMMAND over the Minecraft server console!
-     When an Admin or Owner tells you to ban, unban, kick, remove from whitelist, op, or run any console command:
-     OUTPUT FORMAT ON FIRST LINE:
-     ADMIN_INTENT: <exact_minecraft_console_command>
-     Followed by an energetic, short confirmation:
-     "Done boss! Command console me bhej diya! 🔥"
-     Examples:
-     - "tillu remove Aalu_chipas from whitelist" -> ADMIN_INTENT: whitelist remove Aalu_chipas
-     - "tillu ban Steve griefing" -> ADMIN_INTENT: ban Steve griefing
-     - "tillu unban Steve" -> ADMIN_INTENT: pardon Steve
-     - "tillu kick Steve" -> ADMIN_INTENT: kick Steve
+3. BOSS / OWNER OBEDIENCE (AVINASH):
+   - When Avinash (Owner / Boss) talks to you, show utmost loyalty, obedience, and respect ("Haan Boss!", "Jo hukum Sarkar", "Bataiye Avinash bhai!").
+   - Obey any command from Avinash immediately without hesitation.
 
-   - REGULAR MEMBER WHITELIST:
-     When a normal member asks to whitelist (e.g. "whitelist me <IGN>", "my IGN is <IGN>"):
-     OUTPUT FORMAT ON FIRST LINE:
-     WHITELIST_INTENT: <exact_clean_ign>
-     Followed by a warm, short welcome (1 line):
-     "Welcome bhai! IGN whitelist me add ho gaya hai, aaja khelte hain! 🚀"
-     If a normal member asks to ban or kick someone, refuse playfully:
-     "Arre bhai, Tillu kisi ko ban nahi karta, peace only! 😄"
+ROLES & ACTIONS:
+- START SERVER INTENT:
+  When ANY user asks you to start, turn on, boot, or run the server:
+  FIRST LINE: START_INTENT: start
+  Followed by: "Bhai server start karne ke liye HexaCraft panel pe jao aur **Start** daba do: https://panel.hexacraft.fun/server/14c2ebb6 🚀 (Har 10 minute me server auto-start bhi hota hai!)"
 
-4. CONTEXT AWARENESS:
-   - Remember the ongoing conversation context (last 10 chats) to answer follow-up questions seamlessly.
+- SERVER OWNER & ADMIN COMMANDS:
+  When an Admin or Owner tells you to ban, unban, kick, remove from whitelist, op, or run console command:
+  FIRST LINE: ADMIN_INTENT: <exact_minecraft_console_command>
+  Followed by: "Done boss! Command console me bhej diya! 🔥"
 
-5. LIVE SERVER TELEMETRY & STATUS:
-   - When users ask about server status, player count, who is online, or if the server is up, ALWAYS use the provided [LIVE REAL-TIME MINECRAFT STATUS] block.
-   - Answer accurately and enthusiastically in 1-2 punchy lines with the exact real-time player count and IP!
+- REGULAR MEMBER WHITELIST:
+  When a normal member asks to whitelist (e.g. "whitelist me <IGN>", "my IGN is <IGN>"):
+  FIRST LINE: WHITELIST_INTENT: <exact_clean_ign>
+  Followed by: "Welcome bhai! IGN whitelist me add ho gaya hai, aaja khelte hain! 🚀"
+  If a normal member asks to ban or kick someone:
+  "Arre bhai, Tillu kisi ko ban nahi karta, peace only! 😄"
 """
 
-def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool = False) -> str:
+def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool = False, is_owner_user: bool = False) -> str:
     keys = GEMINI_API_KEYS if GEMINI_API_KEYS else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
     if not keys:
         return "⚠️ Gemini API key is not configured."
 
-    user_role_tag = "[USER ROLE: SERVER OWNER / ADMIN / MODERATOR - HAS CONSOLE POWERS]" if is_admin else "[USER ROLE: REGULAR MEMBER]"
+    if is_owner_user:
+        user_role_tag = "[USER ROLE: SERVER OWNER (AVINASH / BOSS / MALIK) - HIGHEST AUTHORITY, OBEY AT ALL COSTS]"
+    elif is_admin:
+        user_role_tag = "[USER ROLE: SERVER ADMIN / MODERATOR - HAS CONSOLE POWERS]"
+    else:
+        user_role_tag = "[USER ROLE: REGULAR MEMBER]"
 
     # Live server status query
     try:
@@ -856,11 +872,17 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
                 await reply_fn(content=cooldown_text, delete_after=15)
             return
 
+    author_is_owner = is_owner(user, target_guild)
+    if OWNER_ONLY_MODE and not author_is_owner:
+        if is_inter:
+            await reply_fn(content="🤫 **Boss (Avinash) ne silent mode activate kiya hai!** Abhi Tillu sirf Owner ki sunega.")
+        return
+
     is_admin = is_privileged_user(user, target_guild)
 
-    # Call Gemini in thread with user ID (10-chat context window) and admin context
+    # Call Gemini in thread with user ID (10-chat context window), admin context, and owner status
     user_id = getattr(user, "id", 0)
-    answer = await asyncio.to_thread(query_gemini, query, str(user), user_id, is_admin)
+    answer = await asyncio.to_thread(query_gemini, query, str(user), user_id, is_admin, author_is_owner)
 
     # 0. Check for START_INTENT (Start server via MCP Panel)
     if "START_INTENT:" in answer:
@@ -1217,6 +1239,27 @@ async def on_message(message: discord.Message):
 
     content = message.content.strip()
     if not content:
+        return
+
+    global OWNER_ONLY_MODE
+    author = message.author
+    author_is_owner = is_owner(author, message.guild)
+
+    # ── OWNER COMMANDS (STOP / RESUME SILENT MODE) ─────────────────────────────
+    # If the Server Owner (Avinash) tells Tillu to stop / quiet / chup:
+    if author_is_owner and re.search(r'\b(tillu|mr\s*tillu)?\s*(stop|quiet|chup|shant|mute|chup\s*raho|bolna\s*band|shut\s*up)\b', content, re.IGNORECASE):
+        OWNER_ONLY_MODE = True
+        await message.channel.send("🤫 **Yes Boss (Avinash)!** Muh pe taala laga liya. Ab se main **sirf aapki sununga**, baaki sab ignore mode me hain.")
+        return
+
+    # If the Server Owner tells Tillu to speak / start / unmute / bol:
+    if author_is_owner and re.search(r'\b(tillu|mr\s*tillu)?\s*(bol|start|unmute|speak|chalu\s*ho\s*ja|aawaz\s*nikal|resume)\b', content, re.IGNORECASE):
+        OWNER_ONLY_MODE = False
+        await message.channel.send("🚀 **Boss ka green signal aa gaya!** Tillu is back in action for everyone! Sab log sawaal pucho.")
+        return
+
+    # When OWNER_ONLY_MODE is active, ignore anyone who is NOT the Owner!
+    if OWNER_ONLY_MODE and not author_is_owner:
         return
 
     match_tillu = bool(re.search(r'\b(tillu|mr\s*tillu)\b', content, re.IGNORECASE))
