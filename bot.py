@@ -70,10 +70,9 @@ if not GEMINI_API_KEYS and GEMINI_API_KEY:
     GEMINI_API_KEYS = [GEMINI_API_KEY]
 
 GEMINI_MODELS = [
-    "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash",
-    "gemini-3.8-flash"
+    "gemini-flash-latest"
 ]
 
 # ── USER CONTEXT WINDOW (Rolling 10 Chats per User) ──────────────────────────
@@ -210,7 +209,20 @@ def ping_minecraft_server(timeout=2.5):
     except Exception:
         return False, "Offline", 0, 0, None
 
-# ── PTERODACTYL API HELPER ───────────────────────────────────────────────────
+# ── MINECRAFT MCP PANEL INTEGRATION (Pterodactyl & Cloudflare Bypass) ─────────
+MC_MCP_PATH = r"C:\Users\avina\Desktop\minecraftmcp"
+if os.path.exists(MC_MCP_PATH) and MC_MCP_PATH not in sys.path:
+    sys.path.insert(0, MC_MCP_PATH)
+
+try:
+    import server as mc_panel
+    HAS_LOCAL_MCP = True
+    logging.info("[MCP] Successfully linked with local minecraftmcp module.")
+except Exception as mcp_err:
+    HAS_LOCAL_MCP = False
+    mc_panel = None
+    logging.warning(f"[MCP] Local minecraftmcp module notice: {mcp_err}")
+
 def ptero_api_call(method: str, endpoint: str, json_data=None):
     url = f"{PTERO_URL}/api/client/servers/{PTERO_SERVER}{endpoint}"
     headers = {
@@ -227,11 +239,65 @@ def ptero_api_call(method: str, endpoint: str, json_data=None):
     except Exception as e:
         return False, str(e)
 
+def panel_power_action(action: str = "start") -> tuple[bool, str]:
+    """Control server power (start, stop, restart, kill) using minecraftmcp Chrome bypass."""
+    if HAS_LOCAL_MCP and mc_panel:
+        try:
+            res = mc_panel.power_action(action)
+            logging.info(f"[Panel Power MCP] Dispatched '{action}': {res}")
+            return True, str(res)
+        except Exception as e:
+            logging.error(f"[Panel Power MCP] Error: {e}")
+
+    # Fallback to MCP HTTP Bridge if configured (for remote deployments)
+    bridge_url = os.environ.get("MCP_BRIDGE_URL", "")
+    if bridge_url:
+        try:
+            r = requests.post(f"{bridge_url.rstrip('/')}/power", json={"action": action}, timeout=15)
+            if r.status_code == 200:
+                return True, r.text
+        except Exception as be:
+            logging.error(f"[Panel Power Bridge] Error: {be}")
+
+    return ptero_api_call("POST", "/power", {"signal": action})
+
+def panel_send_command(command: str) -> tuple[bool, str]:
+    """Execute Minecraft console command through panel via minecraftmcp."""
+    cmd = command.strip().lstrip('/')
+    if HAS_LOCAL_MCP and mc_panel:
+        try:
+            res = mc_panel.send_command(cmd)
+            logging.info(f"[Panel Command MCP] Dispatched `{cmd}`: {res}")
+            return True, str(res)
+        except Exception as e:
+            logging.error(f"[Panel Command MCP] Error: {e}")
+
+    bridge_url = os.environ.get("MCP_BRIDGE_URL", "")
+    if bridge_url:
+        try:
+            r = requests.post(f"{bridge_url.rstrip('/')}/command", json={"command": cmd}, timeout=15)
+            if r.status_code == 200:
+                return True, r.text
+        except Exception as be:
+            logging.error(f"[Panel Command Bridge] Error: {be}")
+
+    return ptero_api_call("POST", "/command", {"command": cmd})
+
+def panel_get_status() -> dict:
+    """Retrieve live server telemetry (RAM, CPU, state) via minecraftmcp."""
+    if HAS_LOCAL_MCP and mc_panel:
+        try:
+            res = mc_panel.server_status()
+            return json.loads(res) if isinstance(res, str) else res
+        except Exception as e:
+            logging.warning(f"[Panel Status MCP] Notice: {e}")
+    return {}
+
 def send_pterodactyl_start():
-    return ptero_api_call("POST", "/power", {"signal": "start"})
+    return panel_power_action("start")
 
 async def execute_server_command(command: str) -> tuple[bool, str]:
-    """Execute command directly via DiscordSRV console channel and fallback to panel."""
+    """Execute command directly via DiscordSRV console channel and panel MCP."""
     cmd = command.strip().lstrip('/')
     dispatched_console = False
 
@@ -245,13 +311,13 @@ async def execute_server_command(command: str) -> tuple[bool, str]:
     except Exception as e:
         logging.warning(f"[Console Dispatch] DiscordSRV channel send notice: {e}")
 
-    # 2. Also attempt Pterodactyl panel API
+    # 2. Also dispatch via minecraftmcp panel
     try:
-        ptero_ok, ptero_resp = await asyncio.to_thread(ptero_api_call, "POST", "/command", {"command": cmd})
-        if ptero_ok:
-            return True, str(ptero_resp)
+        panel_ok, panel_resp = await asyncio.to_thread(panel_send_command, cmd)
+        if panel_ok:
+            return True, str(panel_resp)
     except Exception as pe:
-        logging.warning(f"[Console Dispatch] Pterodactyl panel notice: {pe}")
+        logging.warning(f"[Console Dispatch] minecraftmcp panel notice: {pe}")
 
     if dispatched_console:
         return True, f"Dispatched to <#{CONSOLE_CHANNEL_ID}>"
@@ -266,7 +332,7 @@ def send_console_command(command: str) -> tuple[bool, str]:
             return True, f"Dispatched to <#{CONSOLE_CHANNEL_ID}>"
         except Exception as e:
             logging.error(f"[send_console_command] Coroutine scheduling notice: {e}")
-    p_ok, p_res = ptero_api_call("POST", "/command", {"command": cmd})
+    p_ok, p_res = panel_send_command(cmd)
     return p_ok, str(p_res)
 
 async def execute_whitelist_command(ign: str) -> bool:
@@ -292,9 +358,9 @@ def send_whitelist_command(ign: str) -> bool:
         except Exception:
             pass
     try:
-        ptero_api_call("POST", "/command", {"command": f"whitelist add {clean_ign}"})
-        ptero_api_call("POST", "/command", {"command": f"fwd:whitelist add {clean_ign}"})
-        ptero_api_call("POST", "/command", {"command": "whitelist reload"})
+        panel_send_command(f"whitelist add {clean_ign}")
+        panel_send_command(f"fwd:whitelist add {clean_ign}")
+        panel_send_command("whitelist reload")
         return True
     except Exception:
         return False
@@ -305,10 +371,19 @@ SYSTEM_KNOWLEDGE = f"""You are Tillu, the friendly, witty, and humorous AI assis
 MINECRAFT SERVER DETAILS:
 - Server Address (Java): {SERVER_HOST}:{SERVER_PORT} (Supports 1.7 to 1.21.x cross-version)
 - Server Address (Bedrock/PE/Mobile): IP: {SERVER_HOST} | Port: {SERVER_PORT}
-- Features: OneBlock Void, Survival SMP with villager trading, Superheroes PvP Arena (kits: Spiderman, Ironman, Thor, Hulk, Flash, Superman).
-- Host: Hexacraft 24/7 protected server.
+- Features & Game Modes:
+  * OneBlock Void: Mine endless regenerating block, progress through 10+ phases (Plains, Nether, End), expand sky island (`/ob`, `/oneblock`).
+  * Survival SMP: Classic survival, player shops, villager trading hall, anti-grief land claiming (`/smp`).
+  * Superheroes Arena: Choose kits with superpowers (`/arena`, `/kit`):
+    - Spider-Man (web slinger & wall climb)
+    - Iron Man (repulsor blast & flight)
+    - Thor (lightning strike & hammer throw)
+    - Hulk (ground smash & super jump)
+    - Flash (speed force & rapid strike)
+    - Superman (heat vision & invulnerability)
+- Host: HexaCraft 24/7 protected server with custom Pterodactyl automation.
 - Whitelist: Whitelist is enabled! Anyone can whitelist themselves by asking you (e.g. "tillu whitelist me <IGN>") or using `/whitelist <ign>`.
-- Power: Anyone can turn on the server anytime using `/start` or `!start`.
+- Power: Anyone can turn on the server anytime using `/start`, `!start`, or by asking you!
 
 STREAM & CHANNEL DETAILS:
 - Creator & Server Owner: AALU_CHIPAS (Avinash)
@@ -324,12 +399,19 @@ PERSONALITY & COMMUNICATION STYLE (CRITICAL):
 2. SHORT & SNAPPY (LESS WORDS):
    - Keep replies short, crisp, and to the point (10-25 words / 1-2 punchy lines max).
    - Never write long essays or walls of text unless the user specifically asks for a full guide/tutorial.
-   - For greetings and casual chats, answer naturally like a real friend in 1 short line. Do NOT spam server details or buttons unless asked!
+   - For greetings and casual chats, answer naturally like a real friend in 1 short line.
 
 3. ROLES & ACTIONS:
+   - START SERVER INTENT:
+     When ANY user asks you to start, turn on, boot, or run the server (in Hindi, Hinglish, or English, e.g. "tillu start server", "server chalu karo", "turn on the server", "server on kardo"):
+     OUTPUT FORMAT ON FIRST LINE:
+     START_INTENT: start
+     Followed by an energetic confirmation:
+     "Bhai server start kar raha hoon! 20-30 seconds me join kar lena! 🚀"
+
    - SERVER OWNER & ADMIN COMMANDS:
      Server Owner (Avinash) and Admins have FULL COMMAND over the Minecraft server console!
-     When an Admin or Owner tells you to ban, unban, kick, remove from whitelist, or run any console command:
+     When an Admin or Owner tells you to ban, unban, kick, remove from whitelist, op, or run any console command:
      OUTPUT FORMAT ON FIRST LINE:
      ADMIN_INTENT: <exact_minecraft_console_command>
      Followed by an energetic, short confirmation:
@@ -370,19 +452,29 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
     except Exception:
         is_up, cur_players, max_players, ver_name = False, 0, 50, "Paper 26.3"
 
+    p_telemetry = ""
+    try:
+        p_status = panel_get_status()
+        if p_status:
+            p_telemetry = f"- Panel State: {p_status.get('status', 'unknown')} (RAM: {p_status.get('ram_mb', 0)}MB, CPU: {p_status.get('cpu_%', 0)}%)\n"
+    except Exception:
+        pass
+
     if is_up:
         live_telemetry = (
             f"[LIVE REAL-TIME MINECRAFT STATUS: ONLINE]\n"
             f"- Players Currently Online: {cur_players}/{max_players}\n"
             f"- Server Version: {ver_name}\n"
             f"- Server IP (Java & Bedrock): {SERVER_HOST}:{SERVER_PORT}\n"
+            f"{p_telemetry}"
             f"If the user asks who is online, how many players are playing, or if server is up, use this exact live data!"
         )
     else:
         live_telemetry = (
-            f"[LIVE REAL-TIME MINECRAFT STATUS: OFFLINE]\n"
+            f"[LIVE REAL-TIME MINECRAFT STATUS: OFFLINE / SLEEPING]\n"
             f"- Server Address: {SERVER_HOST}:{SERVER_PORT}\n"
-            f"If the user asks, tell them the server is currently sleeping/offline, and they can turn it on with /start or !start!"
+            f"{p_telemetry}"
+            f"If the user asks, tell them the server is sleeping/offline, and they can ask you to start it or use /start!"
         )
 
     context_str = ""
@@ -421,7 +513,7 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
                 }
             }
             try:
-                r = requests.post(url, json=payload, timeout=12)
+                r = requests.post(url, json=payload, timeout=10)
                 if r.status_code == 200:
                     data = r.json()
                     text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
@@ -429,7 +521,7 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
                         text = text.strip()
                         if user_id:
                             record_user_context(user_id, "user", prompt)
-                            clean_text = re.sub(r'(ADMIN_INTENT|WHITELIST_INTENT):[^\n\r]+', '', text).strip()
+                            clean_text = re.sub(r'(ADMIN_INTENT|WHITELIST_INTENT|START_INTENT):[^\n\r]+', '', text).strip()
                             record_user_context(user_id, "model", clean_text or text)
                         return text
                 else:
@@ -639,15 +731,15 @@ async def handle_start_request(interaction_or_ctx, user, guild=None):
         try:
             embed_init = discord.Embed(
                 title="🚀 Turning ON the Minecraft Server...",
-                description=f"Startup command triggered by **{user.mention}**!\n\nSending power signal to hosting panel...",
+                description=f"Startup command triggered by **{user.mention}**!\n\nSending power signal to HexaCraft panel via MCP...",
                 color=0x3498DB
             )
             embed_init.add_field(name="📍 Server Address", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
             embed_init.add_field(name="⏳ Expected Boot Time", value="~25-45 seconds for Paper to load worlds.", inline=False)
-            embed_init.set_footer(text="Tillu • 24/7 Cloud Host")
+            embed_init.set_footer(text="Tillu • minecraftmcp Panel Automation")
             await reply_fn(embed=embed_init, view=ServerControlView())
 
-            p_ok, p_res = await asyncio.to_thread(send_pterodactyl_start)
+            p_ok, p_res = await asyncio.to_thread(panel_power_action, "start")
 
             ready = False
             for _ in range(20):
@@ -665,14 +757,14 @@ async def handle_start_request(interaction_or_ctx, user, guild=None):
                 )
                 embed_ready.add_field(name="☕ Java Connection", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
                 embed_ready.add_field(name="📱 Bedrock Connection", value=f"IP: `{SERVER_HOST}` | Port: `{SERVER_PORT}`", inline=False)
-                embed_ready.set_footer(text="Tillu • Have fun!")
+                embed_ready.set_footer(text="Tillu • Have fun playing!")
                 await reply_fn(embed=embed_ready, view=ServerControlView())
             else:
-                desc_note = f"The server is booting up.\nCheck `/status` or connect in 1 minute at `{SERVER_HOST}:{SERVER_PORT}`."
-                if not p_ok and ("Just a moment" in str(p_res) or "403" in str(p_res)):
-                    desc_note += "\n\n*(Note: Hexacraft panel has Cloudflare verification active. Server Owner Avinash can tap Start at [panel.hexacraft.fun](https://panel.hexacraft.fun))*"
+                desc_note = f"The server is booting up.\nCheck `/status` or connect in a few seconds at `{SERVER_HOST}:{SERVER_PORT}`."
+                if not p_ok:
+                    desc_note += f"\n\n*(Panel status: {str(p_res)[:120]})*"
                 embed_to = discord.Embed(
-                    title="⏳ Server Boot Status",
+                    title="⏳ Server Booting Up...",
                     description=desc_note,
                     color=0xF1C40F
                 )
@@ -819,6 +911,22 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
     # Call Gemini in thread with user ID (10-chat context window) and admin context
     user_id = getattr(user, "id", 0)
     answer = await asyncio.to_thread(query_gemini, query, str(user), user_id, is_admin)
+
+    # 0. Check for START_INTENT (Start server via MCP Panel)
+    if "START_INTENT:" in answer:
+        match = re.search(r'START_INTENT:\s*([^\n\r]+)', answer)
+        if match:
+            clean_reply = answer.replace(match.group(0), "").strip()
+            if clean_reply:
+                try:
+                    if hasattr(interaction_or_ctx, "channel") and not is_inter:
+                        await interaction_or_ctx.channel.send(content=clean_reply)
+                    else:
+                        await reply_fn(content=clean_reply)
+                except Exception:
+                    pass
+            await handle_start_request(interaction_or_ctx, user, guild=target_guild)
+            return
 
     # 1. Check for ADMIN_INTENT (Console / Moderation commands for Admin/Owner)
     if "ADMIN_INTENT:" in answer:
