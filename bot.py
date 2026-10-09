@@ -406,8 +406,8 @@ PERSONALITY & COMMUNICATION STYLE (CRITICAL):
      When ANY user asks you to start, turn on, boot, or run the server (in Hindi, Hinglish, or English, e.g. "tillu start server", "server chalu karo", "turn on the server", "server on kardo"):
      OUTPUT FORMAT ON FIRST LINE:
      START_INTENT: start
-     Followed by an energetic confirmation:
-     "Bhai server start kar raha hoon! 20-30 seconds me join kar lena! 🚀"
+     Followed by an energetic confirmation redirecting them to the panel:
+     "Bhai server start karne ke liye HexaCraft panel pe jao aur **Start** daba do: https://panel.hexacraft.fun/server/14c2ebb6 🚀 (Aur har 30 minute me server auto-start bhi hota hai!)"
 
    - SERVER OWNER & ADMIN COMMANDS:
      Server Owner (Avinash) and Admins have FULL COMMAND over the Minecraft server console!
@@ -590,16 +590,17 @@ class WhitelistModal(discord.ui.Modal, title="Minecraft Whitelist"):
 class ServerControlView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
+        self.add_item(discord.ui.Button(label="⚡ Open Panel to Start", url=f"{PTERO_URL}/server/{PTERO_SERVER}", style=discord.ButtonStyle.link, row=0))
 
-    @discord.ui.button(label="🟢 Turn On Server", style=discord.ButtonStyle.success, custom_id="btn_start_server", emoji="⚡")
+    @discord.ui.button(label="🟢 Turn On Server", style=discord.ButtonStyle.success, custom_id="btn_start_server", emoji="⚡", row=1)
     async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await handle_start_request(interaction, user=interaction.user, guild=interaction.guild)
 
-    @discord.ui.button(label="📊 Server Status", style=discord.ButtonStyle.secondary, custom_id="btn_status_server", emoji="🔍")
+    @discord.ui.button(label="📊 Server Status", style=discord.ButtonStyle.secondary, custom_id="btn_status_server", emoji="🔍", row=1)
     async def status_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await handle_status_request(interaction, user=interaction.user, guild=interaction.guild)
 
-    @discord.ui.button(label="📝 Whitelist Me", style=discord.ButtonStyle.primary, custom_id="btn_whitelist_server", emoji="🎟️")
+    @discord.ui.button(label="📝 Whitelist Me", style=discord.ButtonStyle.primary, custom_id="btn_whitelist_server", emoji="🎟️", row=1)
     async def whitelist_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(WhitelistModal())
 
@@ -717,67 +718,28 @@ async def handle_start_request(interaction_or_ctx, user, guild=None):
         await reply_fn(embed=embed, view=ServerControlView())
         return
 
-    if is_starting:
-        embed = discord.Embed(
-            title="⏳ Server is Already Booting Up!",
-            description="Someone has already requested to start the server! Please wait ~20-30 seconds.",
-            color=0xF1C40F
-        )
-        await reply_fn(embed=embed, view=ServerControlView())
-        return
+    # Attempt background panel power action if local MCP / bridge is available
+    asyncio.create_task(asyncio.to_thread(panel_power_action, "start"))
 
-    async with start_lock:
-        is_starting = True
-        try:
-            embed_init = discord.Embed(
-                title="🚀 Turning ON the Minecraft Server...",
-                description=f"Startup command triggered by **{user.mention}**!\n\nSending power signal to HexaCraft panel via MCP...",
-                color=0x3498DB
-            )
-            embed_init.add_field(name="📍 Server Address", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
-            embed_init.add_field(name="⏳ Expected Boot Time", value="~25-45 seconds for Paper to load worlds.", inline=False)
-            embed_init.set_footer(text="Tillu • minecraftmcp Panel Automation")
-            await reply_fn(embed=embed_init, view=ServerControlView())
+    panel_link = f"{PTERO_URL}/server/{PTERO_SERVER}"
+    embed = discord.Embed(
+        title="⚡ Turn On Minecraft Server",
+        description=(
+            f"Bas ek click me server start karo! Neeche link button se HexaCraft panel open karo aur **Start** click karo:\n\n"
+            f"🔗 **Direct Panel URL**: [HexaCraft Panel]({panel_link})\n\n"
+            f"*(💡 Note: Server par 30-minute auto-keepalive schedule bhi active hai, toh server auto-restart hota rahega!)*"
+        ),
+        color=0x3498DB
+    )
+    embed.add_field(name="📍 Server IP", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=True)
+    embed.add_field(name="👥 Status", value="`Offline (Sleeping)`", inline=True)
+    embed.set_footer(text="Tillu • Click below to open panel and start!")
 
-            p_ok, p_res = await asyncio.to_thread(panel_power_action, "start")
-
-            ready = False
-            for _ in range(20):
-                await asyncio.sleep(3)
-                is_up, _, cur_players, _, ver = await asyncio.to_thread(ping_minecraft_server, 2.0)
-                if is_up:
-                    ready = True
-                    break
-
-            if ready:
-                embed_ready = discord.Embed(
-                    title="🎉 Minecraft Server is NOW ONLINE!",
-                    description="The server has booted successfully and is **READY TO PLAY**!",
-                    color=0x2ECC71
-                )
-                embed_ready.add_field(name="☕ Java Connection", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
-                embed_ready.add_field(name="📱 Bedrock Connection", value=f"IP: `{SERVER_HOST}` | Port: `{SERVER_PORT}`", inline=False)
-                embed_ready.set_footer(text="Tillu • Have fun playing!")
-                await reply_fn(embed=embed_ready, view=ServerControlView())
-            else:
-                desc_note = f"The server is booting up.\nCheck `/status` or connect in a few seconds at `{SERVER_HOST}:{SERVER_PORT}`."
-                if not p_ok:
-                    desc_note += f"\n\n*(Panel status: {str(p_res)[:120]})*"
-                embed_to = discord.Embed(
-                    title="⏳ Server Booting Up...",
-                    description=desc_note,
-                    color=0xF1C40F
-                )
-                await reply_fn(embed=embed_to, view=ServerControlView())
-        except Exception as e:
-            embed_err = discord.Embed(
-                title="✖ Notice on Start Request",
-                description=f"Startup signal dispatched. Please check `/status` in 30 seconds.\n`{str(e)[:200]}`",
-                color=0xF1C40F
-            )
-            await reply_fn(embed=embed_err, view=ServerControlView())
-        finally:
-            is_starting = False
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label="⚡ Open Panel to Start", url=panel_link, style=discord.ButtonStyle.link))
+    view.add_item(discord.ui.Button(label="📊 Server Status", style=discord.ButtonStyle.secondary, custom_id="btn_status_server", emoji="🔍"))
+    view.add_item(discord.ui.Button(label="📝 Whitelist Me", style=discord.ButtonStyle.primary, custom_id="btn_whitelist_server", emoji="🎟️"))
+    await reply_fn(embed=embed, view=view)
 
 async def handle_whitelist_request(interaction_or_ctx, ign: str, user, guild=None, bypass_cooldown=False):
     is_inter = isinstance(interaction_or_ctx, discord.Interaction)
