@@ -1,10 +1,12 @@
 {
-  "memories": [
-    {
-      "id": 1,
-      "fact": "Server Owner is Avinash (AALU_CHIPAS). Ultimate Boss.",
-      "added_by": "System",
-      "status": "approved"
+  "updated_at": "2026-10-09T17:08:21Z",
+  "count": 1,
+  "memories": {
+    "server_owner_is_avinash_aalu": {
+      "topic": "server_owner_is_avinash_aalu",
+      "content": "Server Owner is Avinash (AALU_CHIPAS). Ultimate Boss.",
+      "updated_by": "System",
+      "updated_at": "2026-10-09 17:08:21 UTC"
     }
-  ]
+  }
 }

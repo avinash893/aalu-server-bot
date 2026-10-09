@@ -76,7 +76,17 @@ GEMINI_MODELS = [
     "gemini-3-flash-preview"
 ]
 
+# ── TILLU KNOWLEDGE & MEMORY SYSTEM (WITH GITHUB AUTO-SYNC) ──────────────────
+from memory_manager import MemoryManager, normalize_topic
+
+MEMORY_CHANNEL_ID = int(os.environ.get("MEMORY_CHANNEL_ID", "0"))
+memory_mgr = MemoryManager(
+    token=os.environ.get("GITHUB_TOKEN", ""),
+    repo=os.environ.get("GITHUB_REPO", "avinash893/aalu-server-bot")
+)
+
 # ── USER CONTEXT WINDOW (Rolling 10 Chats per User) ──────────────────────────
+
 MAX_USER_HISTORY = 10
 user_context_windows: dict[int, deque] = {}
 
@@ -449,7 +459,14 @@ ROLES & ACTIONS:
   Followed by: "Welcome bhai! IGN whitelist me add ho gaya hai, aaja khelte hain! 🚀"
   If a normal member asks to ban or kick someone:
   "Arre bhai, Tillu kisi ko ban nahi karta, peace only! 😄"
+
+- LEARNING & REMEMBERING INTENT:
+  When a user tells you to remember, learn, memorize, or note down a new rule, fact, setting, IP, or meme:
+  (e.g., "tillu yaad rakh ...", "remember this: ...", "tillu ye note kar le ...", "tillu learn ...", "tillu yaad kar ...", "server ip change ho gaya ..."):
+  FIRST LINE: MEMORY_INTENT: <short_topic_slug> | <clear_fact_content>
+  Followed by: a quick witty or obedient confirmation ("Yaad rakh liya Boss! ✅" or "Noted!").
 """
+
 
 def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool = False, is_owner_user: bool = False) -> str:
     keys = GEMINI_API_KEYS if GEMINI_API_KEYS else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
@@ -493,8 +510,11 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
             history_lines.append(f"{speaker}: {h['text']}")
         context_str = "\n[CONVERSATION CONTEXT (LAST 10 CHATS WITH THIS USER)]:\n" + "\n".join(history_lines) + "\n"
 
+    memory_context = memory_mgr.get_formatted_context()
+
     final_prompt = (
         f"{SYSTEM_KNOWLEDGE}\n\n"
+        f"{memory_context}\n\n"
         f"{live_telemetry}\n\n"
         f"{user_role_tag}\n"
         f"{context_str}\n"
@@ -618,6 +638,78 @@ class WhitelistModal(discord.ui.Modal, title="Minecraft Whitelist"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await handle_whitelist_request(interaction, self.ign_input.value, user=interaction.user, guild=interaction.guild)
+
+class MemoryApprovalView(discord.ui.View):
+    def __init__(self, topic: str, fact: str, proposer_id: int, proposer_name: str, origin_channel_id: int = 0):
+        super().__init__(timeout=86400) # 24h
+        self.topic = topic
+        self.fact = fact
+        self.proposer_id = proposer_id
+        self.proposer_name = proposer_name
+        self.origin_channel_id = origin_channel_id
+
+    @discord.ui.button(label="Approve", style=discord.ButtonStyle.success, emoji="✅")
+    async def approve_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_privileged_user(interaction.user, interaction.guild):
+            await interaction.response.send_message("🚫 Sirf Server Owner ya Admins hi is memory ko approve kar sakte hain!", ephemeral=True)
+            return
+
+        clean_topic, content_clean, overwritten = memory_mgr.add_or_update(
+            self.topic,
+            self.fact,
+            author=f"{self.proposer_name} (Approved by {interaction.user.name})"
+        )
+
+        for child in self.children:
+            child.disabled = True
+
+        embed = interaction.message.embeds[0] if interaction.message.embeds else discord.Embed()
+        embed.color = 0x2ECC71
+        embed.title = "✅ Memory Approved & Synced to GitHub!"
+        embed.set_footer(text=f"Approved by {interaction.user.name} • Permanent Memory Active")
+
+        await interaction.response.edit_message(embed=embed, view=self)
+
+        if self.origin_channel_id:
+            try:
+                ch = interaction.guild.get_channel(self.origin_channel_id)
+                if ch:
+                    await ch.send(f"🧠 <@{self.proposer_id}> ki sikhayi baat Tillu ne yaad rakh li hai: *\"{self.fact}\"* (Approved by {interaction.user.mention}) 🚀")
+            except Exception:
+                pass
+
+    @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger, emoji="❌")
+    async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_privileged_user(interaction.user, interaction.guild):
+            await interaction.response.send_message("🚫 Sirf Server Owner ya Admins hi is memory ko decline kar sakte hain!", ephemeral=True)
+            return
+
+        for child in self.children:
+            child.disabled = True
+
+        embed = interaction.message.embeds[0] if interaction.message.embeds else discord.Embed()
+        embed.color = 0xE74C3C
+        embed.title = "❌ Memory Proposal Declined"
+        embed.set_footer(text=f"Declined by {interaction.user.name}")
+
+        await interaction.response.edit_message(embed=embed, view=self)
+
+def extract_memory_request(text: str) -> tuple[bool, str, str]:
+    """Checks if text is a direct memory teaching command. Returns (is_memory, topic, fact)."""
+    clean = re.sub(r'<@!?\d+>', '', text).strip()
+    patterns = [
+        r'^(?:hey\s+|yo\s+|hello\s+|arre\s+)?(?:mr\s*tillu|tillu)?\s*(?:ye\s+|yeh\s+)?\b(?:yaad\s*(?:rakh\s*(?:na|lo|le)?|kar\s*(?:na|lo|le)?)|remember|note\s*(?:kar\s*(?:lo|le)?|le)?|sikh\s*le|save\s*memory)\b\s*[:,-]?\s*(.+)$',
+        r'^(?:yaad\s*(?:rakh\s*(?:na|lo|le)?|kar\s*(?:na|lo|le)?)|remember|note\s*(?:kar\s*(?:lo|le)?|le)?)\s*[:,-]?\s*(.+)$'
+    ]
+    for pat in patterns:
+        m = re.search(pat, clean, re.IGNORECASE)
+        if m:
+            fact = m.group(1).strip().lstrip(":- ").strip()
+            if fact:
+                words = re.findall(r'\b[a-zA-Z0-9_-]+\b', fact)
+                topic = "_".join(words[:4]).lower() if words else "fact"
+                return True, topic, fact
+    return False, "", ""
 
 class ServerControlView(discord.ui.View):
     def __init__(self):
@@ -965,7 +1057,42 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
             await handle_whitelist_request(interaction_or_ctx, extracted_ign, user, guild=target_guild, bypass_cooldown=True)
             return
 
-    # 3. Final output logic:
+    # 3. Check for Memory Intent (Learning new facts)
+    if "MEMORY_INTENT:" in answer:
+        match = re.search(r'MEMORY_INTENT:\s*([^|\n]+)\s*\|\s*(.+)', answer)
+        if match:
+            extracted_topic = match.group(1).strip()
+            extracted_fact = match.group(2).strip()
+            clean_reply = re.sub(r'MEMORY_INTENT:.*?\n?', '', answer).strip()
+            author_is_owner = is_owner(user, target_guild)
+            if author_is_owner or is_privileged_user(user, target_guild):
+                memory_mgr.add_or_update(
+                    extracted_topic,
+                    extracted_fact,
+                    author=f"{user.name} (Owner)" if author_is_owner else f"{user.name} (Staff)"
+                )
+                conf_msg = f"🧠 **Haan Boss! Yaad rakh liya:**\n> *\"{extracted_fact}\"*\nYeh permanent memory diary me save ho gaya aur GitHub se sync ho chuka hai! 🚀"
+                reply_text = f"{clean_reply}\n\n{conf_msg}" if clean_reply else conf_msg
+                await reply_fn(content=reply_text)
+                return
+            else:
+                console_ch = bot.get_channel(CONSOLE_CHANNEL_ID)
+                ch_name = f"<#{interaction_or_ctx.channel.id}>" if hasattr(interaction_or_ctx, "channel") and interaction_or_ctx.channel else "Direct/Slash"
+                embed = discord.Embed(
+                    title="📝 Memory Approval Request",
+                    description=f"**Proposed by:** {user.mention} (`{user.name}`)\n**Channel:** {ch_name}\n\n**Fact to Remember:**\n> {extracted_fact}",
+                    color=0xF39C12
+                )
+                embed.set_footer(text="Admin Review Required • Click Approve to save to GitHub")
+                orig_ch_id = interaction_or_ctx.channel.id if hasattr(interaction_or_ctx, "channel") and interaction_or_ctx.channel else 0
+                view = MemoryApprovalView(extracted_topic, extracted_fact, user.id, user.name, origin_channel_id=orig_ch_id)
+                if console_ch:
+                    await console_ch.send(embed=embed, view=view)
+                pending_msg = f"📩 **Aapki request bhej di gayi hai!**\nAapki memory (*\"{extracted_fact}\"*) maine Admins & Mods ko review ke liye bhej di hai. Unke approve karte hi main isse yaad rakh lunga! 😄"
+                await reply_fn(content=pending_msg)
+                return
+
+    # 4. Final output logic:
     # - Slash Command Interaction -> Private Ephemeral reply (visible only to the user who ran it)
     # - Prefix Command (!tillu) -> Auto-delete after 45s to avoid chat clutter
     # - Normal chat in channel (on_message) -> Publicly visible as clean plain text, NO EMBEDS!
@@ -1050,6 +1177,59 @@ async def slash_unwhitelist(interaction: discord.Interaction, player: str):
     save_whitelist_registry(new_reg)
     await interaction.response.send_message(f"🗑️ **[Whitelist Removed]** `{clean_p}` removed from whitelist.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.", ephemeral=True)
 
+@bot.tree.command(name="remember", description="Teach Tillu a fact, rule, or server setting to remember permanently")
+@app_commands.describe(fact="What should Tillu remember? (e.g. 'Server rules: No griefing' or 'End dimension opens on Sunday')")
+async def slash_remember(interaction: discord.Interaction, fact: str):
+    clean_fact = fact.strip()
+    words = re.findall(r'\b[a-zA-Z0-9_-]+\b', clean_fact)
+    topic = "_".join(words[:4]).lower() if words else "fact"
+    user = interaction.user
+    guild = interaction.guild
+    author_is_owner = is_owner(user, guild)
+
+    if author_is_owner or is_privileged_user(user, guild):
+        memory_mgr.add_or_update(
+            topic, clean_fact,
+            author=f"{user.name} (Owner)" if author_is_owner else f"{user.name} (Staff)"
+        )
+        await interaction.response.send_message(
+            f"🧠 **Yaad rakh liya!**\n> *\"{clean_fact}\"*\nYeh permanent memory diary me save ho gaya aur GitHub se sync ho chuka hai! 🚀",
+            ephemeral=True
+        )
+    else:
+        console_ch = bot.get_channel(CONSOLE_CHANNEL_ID)
+        embed = discord.Embed(
+            title="📝 Memory Approval Request",
+            description=f"**Proposed by:** {user.mention} (`{user.name}`)\n**Channel:** Slash Command (`/remember`)\n\n**Fact to Remember:**\n> {clean_fact}",
+            color=0xF39C12
+        )
+        embed.set_footer(text="Admin Review Required • Click Approve to save to GitHub")
+        view = MemoryApprovalView(topic, clean_fact, user.id, user.name, origin_channel_id=interaction.channel_id or 0)
+        if console_ch:
+            await console_ch.send(embed=embed, view=view)
+        await interaction.response.send_message(
+            f"📩 **Aapki memory request review ke liye bhej di gayi hai!**\nAapki request (*\"{clean_fact}\"*) Admins/Mods ko console me bhej di gayi hai. Unke approve karte hi Tillu isse yaad rakh lega! 😄",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="memories", description="View facts and rules that Tillu has learned")
+async def slash_memories(interaction: discord.Interaction):
+    all_mems = memory_mgr.get_all()
+    if not all_mems:
+        await interaction.response.send_message("🧠 Tillu ki memory diary abhi khaali hai! Use `/remember` to add something.", ephemeral=True)
+        return
+    embed = discord.Embed(
+        title="🧠 Tillu Persistent Memory Diary",
+        description=f"Total memories synced with GitHub: **{len(all_mems)}**",
+        color=0x3498DB
+    )
+    for k, v in list(all_mems.items())[:20]:
+        val_str = v.get("content", "")
+        author_str = v.get("updated_by", "Unknown")
+        embed.add_field(name=f"📌 {k}", value=f"{val_str}\n*(Added by: {author_str})*", inline=False)
+    embed.set_footer(text="GitHub Auto-Sync Active • avinash893/aalu-server-bot")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
 @bot.tree.command(name="help", description="Show Tillu bot commands & features")
 async def slash_help(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -1058,6 +1238,8 @@ async def slash_help(interaction: discord.Interaction):
         color=0x9B59B6
     )
     embed.add_field(name="💬 Talk Naturally", value="Just type `tillu <question>` or `@Tillu <question>` anywhere in chat!", inline=False)
+    embed.add_field(name="🧠 Teach & Remember", value="`tillu yaad rakh <baat>` or `/remember <fact>` (Owner/Admins save directly; Members send review ticket)", inline=False)
+    embed.add_field(name="📖 View Memories", value="`/memories` to see learned server knowledge", inline=False)
     embed.add_field(name="🎟️ Whitelist Me", value="Say `tillu whitelist me <IGN>` or `/whitelist <ign>`", inline=False)
     embed.add_field(name="🚀 Turn On Server", value="`/start`, `!start`, or the green button below", inline=False)
     embed.add_field(name="🔍 Check Status", value="`/status`, `!status`, or `!ip`", inline=False)
@@ -1302,6 +1484,29 @@ async def on_message(message: discord.Message):
             is_active_session = True
         else:
             ACTIVE_USER_CONVERSATIONS.pop(session_key, None)
+
+    # ── CHECK DIRECT MEMORY COMMAND ("tillu yaad rakh <baat>", "remember <fact>") ──
+    is_mem, mem_topic, mem_fact = extract_memory_request(content)
+    if is_mem and (match_tillu or is_mentioned or is_reply_to_bot or is_active_session):
+        if author_is_owner or is_privileged_user(author, message.guild):
+            clean_top, clean_cont, over = memory_mgr.add_or_update(
+                mem_topic, mem_fact, author=f"{author.name} (Owner)" if author_is_owner else f"{author.name} (Staff)"
+            )
+            await message.channel.send(f"🧠 **Haan Boss! Yaad rakh liya:**\n> *\"{mem_fact}\"*\nYeh permanent memory diary me save ho gaya aur GitHub se sync ho chuka hai! 🚀")
+            return
+        else:
+            console_ch = bot.get_channel(CONSOLE_CHANNEL_ID)
+            embed = discord.Embed(
+                title="📝 Memory Approval Request",
+                description=f"**Proposed by:** {author.mention} (`{author.name}`)\n**Channel:** {message.channel.mention}\n\n**Fact to Remember:**\n> {mem_fact}",
+                color=0xF39C12
+            )
+            embed.set_footer(text="Admin Review Required • Click Approve to save to GitHub")
+            view = MemoryApprovalView(mem_topic, mem_fact, author.id, author.name, origin_channel_id=message.channel.id)
+            if console_ch:
+                await console_ch.send(embed=embed, view=view)
+            await message.channel.send(f"📩 **Aapki request bhej di gayi hai!**\nAapki memory (*\"{mem_fact}\"*) maine Admins & Mods ko review ke liye bhej di hai. Unke approve karte hi main isse yaad rakh lunga! 😄")
+            return
 
     # SPECIAL CASE: Whitelist channel dedicated listener (Tillu ALWAYS reads and replies to every message here!)
     is_whitelist_channel = (
