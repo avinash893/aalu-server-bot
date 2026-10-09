@@ -1112,11 +1112,17 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
     else:
         # Normal chat in channel: Publicly visible clean plain text (NO EMBEDS!)
         if hasattr(interaction_or_ctx, "channel"):
-            await interaction_or_ctx.channel.send(content=answer)
+            want_tts = bool(re.search(r'\b(tts|voice|awaaz|awaz|bol\s*ke|speak\s*out)\b', query, re.IGNORECASE))
+            await interaction_or_ctx.channel.send(content=answer, tts=want_tts)
         else:
             await reply_fn(content=answer)
 
 # ── SLASH COMMANDS ───────────────────────────────────────────────────────────
+@bot.tree.command(name="tts", description="Make Tillu speak out loud using Discord TTS")
+@app_commands.describe(message="The message Tillu should speak out loud")
+async def slash_tts(interaction: discord.Interaction, message: str):
+    await interaction.channel.send(f"🗣️ **{interaction.user.name}:** {message}", tts=True)
+    await interaction.response.send_message("🔊 TTS message bol diya!", ephemeral=True)
 @bot.tree.command(name="ask", description="Ask Tillu anything about the server, stream, or request whitelist!")
 @app_commands.describe(query="What would you like to ask Tillu? (e.g. 'whitelist me GamerX' or 'how to join SMP')")
 async def slash_ask(interaction: discord.Interaction, query: str):
@@ -1458,13 +1464,13 @@ async def on_message(message: discord.Message):
 
     # ── OWNER COMMANDS (STOP / RESUME SILENT MODE) ─────────────────────────────
     # If the Server Owner (Avinash) tells Tillu to stop / quiet / chup:
-    if author_is_owner and re.search(r'\b(tillu|mr\s*tillu)?\s*(stop|quiet|chup|shant|mute|chup\s*raho|bolna\s*band|shut\s*up)\b', content, re.IGNORECASE):
+    if author_is_owner and re.search(r'^(?:hey\s+|arre\s+)?(?:tillu|mr\s*tillu)?\s*(?:stop|quiet|chup|shant|mute|chup\s*raho|bolna\s*band|shut\s*up|so\s*ja)$', content, re.IGNORECASE):
         OWNER_ONLY_MODE = True
         await message.channel.send("🤫 **Yes Boss (Avinash)!** Muh pe taala laga liya. Ab se main **sirf aapki sununga**, baaki sab ignore mode me hain.")
         return
 
-    # If the Server Owner tells Tillu to speak / start / unmute / bol:
-    if author_is_owner and re.search(r'\b(tillu|mr\s*tillu)?\s*(bol|start|unmute|speak|chalu\s*ho\s*ja|aawaz\s*nikal|resume)\b', content, re.IGNORECASE):
+    # If the Server Owner tells Tillu to speak / start / unmute / resume:
+    if author_is_owner and re.search(r'^(?:hey\s+|arre\s+)?(?:tillu|mr\s*tillu)?\s*(?:start|unmute|resume|bolna\s*shuru\s*kar|chalu\s*ho\s*ja|ab\s*sabse\s*bol|aawaz\s*nikal|unstop)$', content, re.IGNORECASE):
         OWNER_ONLY_MODE = False
         await message.channel.send("🚀 **Boss ka green signal aa gaya!** Tillu is back in action for everyone! Sab log sawaal pucho.")
         return
