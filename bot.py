@@ -1236,7 +1236,8 @@ async def on_member_join(member: discord.Member):
 
 @bot.event
 async def on_message(message: discord.Message):
-    if message.author.bot:
+    # Only ignore Tillu himself to prevent self-looping (allow access/interaction with other bots)
+    if bot.user and message.author.id == bot.user.id:
         return
 
     # Check for reel or video link/attachment to reply after 5 minutes
@@ -1329,11 +1330,8 @@ async def on_message(message: discord.Message):
         except Exception as e:
             logging.error(f"[Whitelist Channel Query] Error: {e}")
 
-    # Check if message is a general Minecraft / server query (e.g. whitelist, IP, player count, start)
-    is_server_query = bool(re.search(r'\b(whitelist|white list|ip|port|kitne log|khel rhe|khel rahe|online hai|server on|server off|start server|how to join|kaise join)\b', content, re.IGNORECASE))
-
-    # CASE A: Explicit wake-up, message directed at Tillu, or direct server question
-    if is_mentioned or is_reply_to_bot or match_tillu or is_server_query:
+    # CASE A: Explicit wake-up or message directed at Tillu (only respond when addressed)
+    if is_mentioned or is_reply_to_bot or match_tillu:
         if is_dismissal:
             ACTIVE_USER_CONVERSATIONS.pop(session_key, None)
         else:
