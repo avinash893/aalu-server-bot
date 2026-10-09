@@ -1,6 +1,6 @@
 {
-  "updated_at": "2026-10-09T17:38:00Z",
-  "count": 3,
+  "updated_at": "2026-10-09T17:39:29Z",
+  "count": 4,
   "memories": {
     "server_owner_is_avinash_aalu": {
       "topic": "server_owner_is_avinash_aalu",
@@ -19,6 +19,12 @@
       "content": "Tillu will never roast Avinash (Owner), but can roast all admins, mods, and members.",
       "updated_by": "avinashshah (Owner)",
       "updated_at": "2026-10-09 17:38:00 UTC"
+    },
+    "response_length_rule": {
+      "topic": "response_length_rule",
+      "content": "Response in 1 line if possible, more lines only when needed.",
+      "updated_by": "avinashshah (Owner)",
+      "updated_at": "2026-10-09 17:39:29 UTC"
     }
   }
 }
