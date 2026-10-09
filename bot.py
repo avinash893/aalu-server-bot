@@ -465,10 +465,23 @@ ROLES & ACTIONS:
   (e.g., "tillu yaad rakh ...", "remember this: ...", "tillu ye note kar le ...", "tillu learn ...", "tillu yaad kar ...", "server ip change ho gaya ..."):
   FIRST LINE: MEMORY_INTENT: <short_topic_slug> | <clear_fact_content>
   Followed by: a quick witty or obedient confirmation ("Yaad rakh liya Boss! ✅" or "Noted!").
+
+- TAGGING & MENTIONS:
+  When a Server Owner or Moderator asks you to tag or ping someone (e.g. "tillu tag @user <message>", "tillu @someone ko bula"):
+  You CAN include the tag/mention in your response!
+  IF a regular member asks you to tag, ping, or mention anyone, everyone, or a role:
+  Refuse politely: "Arre bhai, kisi ko tag/ping karne ki permission sirf Mods aur Owner ke paas hai! 🤐"
+
+- CONTROLLING OTHER SERVER BOTS:
+  If a Server Owner or Moderator asks you to command, trigger, or control another bot in this server (e.g. TTS bot, music bot, Carl-bot, etc.):
+  FIRST LINE: BOT_COMMAND: <exact_command_to_send> (e.g., BOT_COMMAND: !tts hello or BOT_COMMAND: !play song or BOT_COMMAND: !help)
+  Followed by: a quick witty confirmation.
+  IF a regular member asks you to control or trigger other bots:
+  Refuse: "Doosre bots ko command dene ka haq sirf Server Owner aur Moderators ka hai! 🚫"
 """
 
 
-def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool = False, is_owner_user: bool = False) -> str:
+def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool = False, is_owner_user: bool = False, target_guild: discord.Guild = None) -> str:
     keys = GEMINI_API_KEYS if GEMINI_API_KEYS else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
     if not keys:
         return "⚠️ Gemini API key is not configured."
@@ -476,7 +489,7 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
     if is_owner_user:
         user_role_tag = "[USER ROLE: SERVER OWNER (AVINASH / BOSS / MALIK) - HIGHEST AUTHORITY, OBEY AT ALL COSTS]"
     elif is_admin:
-        user_role_tag = "[USER ROLE: SERVER ADMIN / MODERATOR - HAS CONSOLE POWERS]"
+        user_role_tag = "[USER ROLE: SERVER ADMIN / MODERATOR - HAS CONSOLE & BOT CONTROL POWERS]"
     else:
         user_role_tag = "[USER ROLE: REGULAR MEMBER]"
 
@@ -501,6 +514,12 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
             f"If the user asks, tell them the server is sleeping/offline, and they can ask you to start it or use /start!"
         )
 
+    bots_summary = ""
+    if target_guild:
+        other_bots = [m.name for m in target_guild.members if m.bot and m.id != (bot.user.id if bot.user else 0)]
+        if other_bots:
+            bots_summary = f"[OTHER BOTS ACTIVE IN THIS SERVER]: {', '.join(other_bots)}\n(Only Server Owner & Moderators can instruct you to control these bots).\n"
+
     context_str = ""
     history = get_user_context(user_id)
     if history:
@@ -516,6 +535,7 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
         f"{SYSTEM_KNOWLEDGE}\n\n"
         f"{memory_context}\n\n"
         f"{live_telemetry}\n\n"
+        f"{bots_summary}"
         f"{user_role_tag}\n"
         f"{context_str}\n"
         f"Current Query from {user_name}: {prompt}\n"
@@ -639,6 +659,72 @@ class WhitelistModal(discord.ui.Modal, title="Minecraft Whitelist"):
     async def on_submit(self, interaction: discord.Interaction):
         await handle_whitelist_request(interaction, self.ign_input.value, user=interaction.user, guild=interaction.guild)
 
+async def get_or_create_memory_channel(guild: discord.Guild) -> discord.TextChannel | None:
+    """Find or auto-create the dedicated #tillu-memory channel."""
+    if not guild:
+        return None
+    global MEMORY_CHANNEL_ID
+    if MEMORY_CHANNEL_ID:
+        ch = guild.get_channel(MEMORY_CHANNEL_ID)
+        if ch:
+            return ch
+
+    # Search existing channels
+    for ch in guild.text_channels:
+        if ch.name.lower() in ["tillu-memory", "bot-memory", "memory-log", "memories", "tillu-diary"]:
+            MEMORY_CHANNEL_ID = ch.id
+            return ch
+
+    # Auto-create if bot has permission
+    try:
+        me = guild.me or guild.get_member(bot.user.id if bot.user else 0)
+        if me and me.guild_permissions.manage_channels:
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(read_messages=True, send_messages=False),
+                me: discord.PermissionOverwrite(read_messages=True, send_messages=True, embed_links=True)
+            }
+            for role in guild.roles:
+                if any(w in role.name.lower() for w in ["admin", "owner", "mod", "moderator", "staff"]):
+                    overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True)
+
+            new_ch = await guild.create_text_channel(
+                name="tillu-memory",
+                overwrites=overwrites,
+                topic="🧠 Tillu Bot Persistent Memory & Knowledge Updates (Synced with GitHub)",
+                reason="Tillu persistent memory diary channel"
+            )
+            MEMORY_CHANNEL_ID = new_ch.id
+            logging.info(f"[Memory Channel] Created dedicated #{new_ch.name} ({new_ch.id})")
+            welcome_embed = discord.Embed(
+                title="🧠 Tillu Memory Diary Active",
+                description="Yeh Tillu ka dedicated memory channel hai! Yahan saari learned baatein, rule updates, aur member proposals GitHub se sync hongi.",
+                color=0x9B59B6
+            )
+            welcome_embed.set_footer(text="GitHub Auto-Sync Active • avinash893/aalu-server-bot")
+            await new_ch.send(embed=welcome_embed)
+            return new_ch
+    except Exception as e:
+        logging.warning(f"[Memory Channel] Create notice: {e}")
+
+    # Fallback to CONSOLE_CHANNEL_ID
+    return guild.get_channel(CONSOLE_CHANNEL_ID) or bot.get_channel(CONSOLE_CHANNEL_ID)
+
+async def announce_memory_update(guild: discord.Guild, topic: str, fact: str, author_name: str):
+    if not guild:
+        return
+    mem_ch = await get_or_create_memory_channel(guild)
+    if mem_ch:
+        embed = discord.Embed(
+            title="🧠 New Memory Added & Synced to GitHub!",
+            description=f"**Fact:**\n> {fact}\n\n**Topic:** `{topic}`\n**Updated by:** {author_name}",
+            color=0x2ECC71
+        )
+        embed.set_footer(text="GitHub Auto-Sync Active • avinash893/aalu-server-bot")
+        try:
+            await mem_ch.send(embed=embed)
+        except Exception as e:
+            logging.warning(f"[announce_memory_update] Error: {e}")
+
 class MemoryApprovalView(discord.ui.View):
     def __init__(self, topic: str, fact: str, proposer_id: int, proposer_name: str, origin_channel_id: int = 0):
         super().__init__(timeout=86400) # 24h
@@ -677,6 +763,8 @@ class MemoryApprovalView(discord.ui.View):
                     await ch.send(f"🧠 <@{self.proposer_id}> ki sikhayi baat Tillu ne yaad rakh li hai: *\"{self.fact}\"* (Approved by {interaction.user.mention}) 🚀")
             except Exception:
                 pass
+
+        asyncio.create_task(announce_memory_update(interaction.guild, self.topic, self.fact, f"{self.proposer_name} (Approved by {interaction.user.name})"))
 
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.danger, emoji="❌")
     async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1002,7 +1090,7 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
 
     # Call Gemini in thread with user ID (10-chat context window), admin context, and owner status
     user_id = getattr(user, "id", 0)
-    answer = await asyncio.to_thread(query_gemini, query, str(user), user_id, is_admin, author_is_owner)
+    answer = await asyncio.to_thread(query_gemini, query, str(user), user_id, is_admin, author_is_owner, target_guild)
 
     # 0. Check for START_INTENT (Start server via MCP Panel)
     if "START_INTENT:" in answer:
@@ -1057,7 +1145,25 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
             await handle_whitelist_request(interaction_or_ctx, extracted_ign, user, guild=target_guild, bypass_cooldown=True)
             return
 
-    # 3. Check for Memory Intent (Learning new facts)
+    # 3. Check for Bot Command Intent (Owner / Moderator controlling another bot)
+    if "BOT_COMMAND:" in answer:
+        match = re.search(r'BOT_COMMAND:\s*(.+)', answer)
+        if match:
+            bot_cmd = match.group(1).strip()
+            clean_reply = re.sub(r'BOT_COMMAND:.*?\n?', '', answer).strip()
+            if is_admin:
+                if hasattr(interaction_or_ctx, "channel") and interaction_or_ctx.channel:
+                    await interaction_or_ctx.channel.send(bot_cmd)
+                if clean_reply:
+                    await reply_fn(content=f"{clean_reply}\n*(Command dispatched: `{bot_cmd}`)*")
+                else:
+                    await reply_fn(content=f"🤖 **[Bot Command Sent]** `{bot_cmd}` channel me bhej diya!")
+                return
+            else:
+                await reply_fn(content="🚫 Doosre bots ko command dene ki permission sirf Server Owner aur Moderators ke paas hai!")
+                return
+
+    # 4. Check for Memory Intent (Learning new facts)
     if "MEMORY_INTENT:" in answer:
         match = re.search(r'MEMORY_INTENT:\s*([^|\n]+)\s*\|\s*(.+)', answer)
         if match:
@@ -1074,9 +1180,10 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
                 conf_msg = f"🧠 **Haan Boss! Yaad rakh liya:**\n> *\"{extracted_fact}\"*\nYeh permanent memory diary me save ho gaya aur GitHub se sync ho chuka hai! 🚀"
                 reply_text = f"{clean_reply}\n\n{conf_msg}" if clean_reply else conf_msg
                 await reply_fn(content=reply_text)
+                asyncio.create_task(announce_memory_update(target_guild, extracted_topic, extracted_fact, f"{user.name} (Owner)" if author_is_owner else f"{user.name} (Staff)"))
                 return
             else:
-                console_ch = bot.get_channel(CONSOLE_CHANNEL_ID)
+                mem_ch = await get_or_create_memory_channel(target_guild)
                 ch_name = f"<#{interaction_or_ctx.channel.id}>" if hasattr(interaction_or_ctx, "channel") and interaction_or_ctx.channel else "Direct/Slash"
                 embed = discord.Embed(
                     title="📝 Memory Approval Request",
@@ -1086,13 +1193,13 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
                 embed.set_footer(text="Admin Review Required • Click Approve to save to GitHub")
                 orig_ch_id = interaction_or_ctx.channel.id if hasattr(interaction_or_ctx, "channel") and interaction_or_ctx.channel else 0
                 view = MemoryApprovalView(extracted_topic, extracted_fact, user.id, user.name, origin_channel_id=orig_ch_id)
-                if console_ch:
-                    await console_ch.send(embed=embed, view=view)
-                pending_msg = f"📩 **Aapki request bhej di gayi hai!**\nAapki memory (*\"{extracted_fact}\"*) maine Admins & Mods ko review ke liye bhej di hai. Unke approve karte hi main isse yaad rakh lunga! 😄"
+                if mem_ch:
+                    await mem_ch.send(embed=embed, view=view)
+                pending_msg = f"📩 **Aapki request bhej di gayi hai!**\nAapki memory (*\"{extracted_fact}\"*) maine review ke liye bhej di hai. Unke approve karte hi main isse yaad rakh lunga! 😄"
                 await reply_fn(content=pending_msg)
                 return
 
-    # 4. Final output logic:
+    # 5. Final output logic:
     # - Slash Command Interaction -> Private Ephemeral reply (visible only to the user who ran it)
     # - Prefix Command (!tillu) -> Auto-delete after 45s to avoid chat clutter
     # - Normal chat in channel (on_message) -> Publicly visible as clean plain text, NO EMBEDS!
@@ -1113,7 +1220,9 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
         # Normal chat in channel: Publicly visible clean plain text (NO EMBEDS!)
         if hasattr(interaction_or_ctx, "channel"):
             want_tts = bool(re.search(r'\b(tts|voice|awaaz|awaz|bol\s*ke|speak\s*out)\b', query, re.IGNORECASE))
-            await interaction_or_ctx.channel.send(content=answer, tts=want_tts)
+            is_mod_or_above = author_is_owner or is_privileged_user(user, target_guild)
+            allowed_m = discord.AllowedMentions(users=True, roles=True, everyone=False) if is_mod_or_above else discord.AllowedMentions.none()
+            await interaction_or_ctx.channel.send(content=answer, tts=want_tts, allowed_mentions=allowed_m)
         else:
             await reply_fn(content=answer)
 
@@ -1202,8 +1311,9 @@ async def slash_remember(interaction: discord.Interaction, fact: str):
             f"🧠 **Yaad rakh liya!**\n> *\"{clean_fact}\"*\nYeh permanent memory diary me save ho gaya aur GitHub se sync ho chuka hai! 🚀",
             ephemeral=True
         )
+        asyncio.create_task(announce_memory_update(guild, topic, clean_fact, f"{user.name} (Owner)" if author_is_owner else f"{user.name} (Staff)"))
     else:
-        console_ch = bot.get_channel(CONSOLE_CHANNEL_ID)
+        mem_ch = await get_or_create_memory_channel(guild)
         embed = discord.Embed(
             title="📝 Memory Approval Request",
             description=f"**Proposed by:** {user.mention} (`{user.name}`)\n**Channel:** Slash Command (`/remember`)\n\n**Fact to Remember:**\n> {clean_fact}",
@@ -1211,10 +1321,10 @@ async def slash_remember(interaction: discord.Interaction, fact: str):
         )
         embed.set_footer(text="Admin Review Required • Click Approve to save to GitHub")
         view = MemoryApprovalView(topic, clean_fact, user.id, user.name, origin_channel_id=interaction.channel_id or 0)
-        if console_ch:
-            await console_ch.send(embed=embed, view=view)
+        if mem_ch:
+            await mem_ch.send(embed=embed, view=view)
         await interaction.response.send_message(
-            f"📩 **Aapki memory request review ke liye bhej di gayi hai!**\nAapki request (*\"{clean_fact}\"*) Admins/Mods ko console me bhej di gayi hai. Unke approve karte hi Tillu isse yaad rakh lega! 😄",
+            f"📩 **Aapki memory request review ke liye bhej di gayi hai!**\nAapki request (*\"{clean_fact}\"*) review ke liye bhej di gayi hai. Unke approve karte hi Tillu isse yaad rakh lega! 😄",
             ephemeral=True
         )
 
@@ -1234,6 +1344,47 @@ async def slash_memories(interaction: discord.Interaction):
         author_str = v.get("updated_by", "Unknown")
         embed.add_field(name=f"📌 {k}", value=f"{val_str}\n*(Added by: {author_str})*", inline=False)
     embed.set_footer(text="GitHub Auto-Sync Active • avinash893/aalu-server-bot")
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="tag", description="Owner/Admin/Mod only: Have Tillu tag or ping a user or role with a message")
+@app_commands.describe(target="The user or role mention to tag (e.g. @Gamer or @Admin)", message="Your message")
+async def slash_tag(interaction: discord.Interaction, target: str, message: str):
+    if not is_privileged_user(interaction.user, interaction.guild):
+        await interaction.response.send_message("🚫 Sirf Server Owner, Admins aur Moderators hi mujhe kisi ko tag karne bol sakte hain!", ephemeral=True)
+        return
+    await interaction.channel.send(
+        f"📢 {target.strip()} — {message.strip()}\n*(Tagged by {interaction.user.mention})*",
+        allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False)
+    )
+    await interaction.response.send_message("✅ Tag message bhej diya!", ephemeral=True)
+
+@bot.tree.command(name="botcmd", description="Owner/Admin/Mod only: Have Tillu send a command to control or trigger another bot")
+@app_commands.describe(command="Exact bot command to run (e.g. '!tts hello' or '!play music')")
+async def slash_botcmd(interaction: discord.Interaction, command: str):
+    if not is_privileged_user(interaction.user, interaction.guild):
+        await interaction.response.send_message("🚫 Sirf Server Owner aur Moderators hi mujhe doosre bots ko command dene bol sakte hain!", ephemeral=True)
+        return
+    await interaction.channel.send(command.strip())
+    await interaction.response.send_message(f"🤖 Sent command `{command.strip()}` to <#{interaction.channel_id}>!", ephemeral=True)
+
+@bot.tree.command(name="listbots", description="List all other bots currently active in this Discord server")
+async def slash_listbots(interaction: discord.Interaction):
+    guild = interaction.guild
+    if not guild:
+        await interaction.response.send_message("🚫 Server me hi use ho sakta hai!", ephemeral=True)
+        return
+    bots = [m for m in guild.members if m.bot and m.id != (bot.user.id if bot.user else 0)]
+    if not bots:
+        await interaction.response.send_message("🤖 Is server me koi doosra bot nahi mila!", ephemeral=True)
+        return
+    embed = discord.Embed(
+        title=f"🤖 Bots in {guild.name}",
+        description=f"Total other bots detected: **{len(bots)}**",
+        color=0x3498DB
+    )
+    for b in bots:
+        embed.add_field(name=f"🤖 {b.display_name}", value=f"Tag: {b.mention}\nID: `{b.id}`", inline=True)
+    embed.set_footer(text="Owner & Moderators can ask Tillu to control these bots via chat or /botcmd")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="help", description="Show Tillu bot commands & features")
@@ -1262,6 +1413,25 @@ async def cmd_tillu(ctx, *, query: str = None):
         await ctx.send("❌ Usage: `!tillu <your question or whitelist request>`")
         return
     await handle_ask_request(ctx, query, user=ctx.author, guild=ctx.guild)
+
+@bot.command(name="botcmd", aliases=["botcommand", "runbot"])
+async def cmd_botcmd(ctx, *, command: str = None):
+    if not is_privileged_user(ctx.author, ctx.guild):
+        await ctx.send("🚫 Sirf Server Owner, Admins aur Moderators hi mujhe dusre bots ko command dene bol sakte hain!")
+        return
+    if not command:
+        await ctx.send("❌ Usage: `!botcmd <command>` (e.g. `!botcmd !tts hello`)")
+        return
+    await ctx.send(command.strip())
+
+@bot.command(name="listbots", aliases=["bots"])
+async def cmd_listbots(ctx):
+    bots = [m for m in ctx.guild.members if m.bot and m.id != (bot.user.id if bot.user else 0)]
+    if not bots:
+        await ctx.send("🤖 Is server me koi doosra bot nahi mila!")
+        return
+    bot_names = ", ".join(f"`{b.name}`" for b in bots)
+    await ctx.send(f"🤖 **Detected Bots ({len(bots)}):** {bot_names}\n*(Owner/Mods can tell Tillu to run commands for them!)*")
 
 @bot.command(name="c", aliases=["console", "cmd"])
 async def cmd_console(ctx, *, command: str = None):
@@ -1499,9 +1669,10 @@ async def on_message(message: discord.Message):
                 mem_topic, mem_fact, author=f"{author.name} (Owner)" if author_is_owner else f"{author.name} (Staff)"
             )
             await message.channel.send(f"🧠 **Haan Boss! Yaad rakh liya:**\n> *\"{mem_fact}\"*\nYeh permanent memory diary me save ho gaya aur GitHub se sync ho chuka hai! 🚀")
+            asyncio.create_task(announce_memory_update(message.guild, clean_top, mem_fact, f"{author.name} (Owner)" if author_is_owner else f"{author.name} (Staff)"))
             return
         else:
-            console_ch = bot.get_channel(CONSOLE_CHANNEL_ID)
+            mem_ch = await get_or_create_memory_channel(message.guild)
             embed = discord.Embed(
                 title="📝 Memory Approval Request",
                 description=f"**Proposed by:** {author.mention} (`{author.name}`)\n**Channel:** {message.channel.mention}\n\n**Fact to Remember:**\n> {mem_fact}",
@@ -1509,9 +1680,9 @@ async def on_message(message: discord.Message):
             )
             embed.set_footer(text="Admin Review Required • Click Approve to save to GitHub")
             view = MemoryApprovalView(mem_topic, mem_fact, author.id, author.name, origin_channel_id=message.channel.id)
-            if console_ch:
-                await console_ch.send(embed=embed, view=view)
-            await message.channel.send(f"📩 **Aapki request bhej di gayi hai!**\nAapki memory (*\"{mem_fact}\"*) maine Admins & Mods ko review ke liye bhej di hai. Unke approve karte hi main isse yaad rakh lunga! 😄")
+            if mem_ch:
+                await mem_ch.send(embed=embed, view=view)
+            await message.channel.send(f"📩 **Aapki request bhej di gayi hai!**\nAapki memory (*\"{mem_fact}\"*) maine review ke liye bhej di hai. Unke approve karte hi main isse yaad rakh lunga! 😄")
             return
 
     # SPECIAL CASE: Whitelist channel dedicated listener (Tillu ALWAYS reads and replies to every message here!)
@@ -1652,6 +1823,16 @@ async def on_ready():
             await guild.me.edit(nick="Tillu")
         except Exception:
             pass
+        # Discover other bots in server
+        other_bots = [m for m in guild.members if m.bot and m.id != bot.user.id]
+        if other_bots:
+            logging.info(f"[Server Bots] Detected {len(other_bots)} other bots in '{guild.name}': {[b.name for b in other_bots]}")
+        # Ensure dedicated memory channel exists
+        try:
+            await get_or_create_memory_channel(guild)
+        except Exception as me:
+            logging.warning(f"[Memory Channel Init] {me}")
+
     asyncio.create_task(guardian_loop())
     asyncio.create_task(render_keepalive_loop())
 
