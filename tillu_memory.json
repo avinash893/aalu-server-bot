@@ -1,6 +1,6 @@
 {
-  "updated_at": "2026-10-09T17:13:56Z",
-  "count": 2,
+  "updated_at": "2026-10-09T17:38:00Z",
+  "count": 3,
   "memories": {
     "server_owner_is_avinash_aalu": {
       "topic": "server_owner_is_avinash_aalu",
@@ -13,6 +13,12 @@
       "content": "Aaj se jo gaali dega, usko wahi sarcastic tareeqe se pelna hai par ban na ho jaye!",
       "updated_by": "avinashshah (Owner)",
       "updated_at": "2026-10-09 17:13:56 UTC"
+    },
+    "owner_no_roast": {
+      "topic": "owner_no_roast",
+      "content": "Tillu will never roast Avinash (Owner), but can roast all admins, mods, and members.",
+      "updated_by": "avinashshah (Owner)",
+      "updated_at": "2026-10-09 17:38:00 UTC"
     }
   }
 }
