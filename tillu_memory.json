@@ -1,11 +1,12 @@
 {
-  "updated_at": "2026-10-09T22:30:00Z",
+  "updated_at": "2026-10-09T16:54:23Z",
+  "count": 1,
   "memories": {
     "minecraft_server_ip": {
       "topic": "minecraft_server_ip",
-      "content": "Server Address: legacy-7.hexacraft.fun:25587 (Port 25587 for both Java and Bedrock). Do NOT give 25255.",
-      "updated_by": "Avinash shah (Owner)",
-      "updated_at": "2026-10-09 22:30:00 UTC"
+      "content": "Server Address is legacy-7.hexacraft.fun:25587 (Port 25587 for both Java and Bedrock).",
+      "updated_by": "Avinash shah",
+      "updated_at": "2026-10-09 16:54:23 UTC"
     }
   }
 }
