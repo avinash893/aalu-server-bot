@@ -20,6 +20,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 from collections import deque
+from typing import Optional, List, Dict, Any, Union
 
 # Force UTF-8 output encoding across environments to avoid UnicodeEncodeError crashes
 try:
@@ -1644,6 +1645,16 @@ async def on_member_join(member: discord.Member):
 
 def format_whitelisted_players_embed(content: str) -> Optional[discord.Embed]:
     """Parse raw console whitelist output and format arranged by alphabet first, then other characters."""
+    if "no whitelisted player" in content.lower():
+        embed = discord.Embed(
+            title="📋 Whitelisted Players (0 Total)",
+            description="Koi bhi player whitelist me nahi hai! (No whitelisted players found)",
+            color=0xE74C3C,
+            timestamp=discord.utils.utcnow()
+        )
+        embed.set_footer(text="Arranged Alphabetically (A–Z) followed by Symbols • Tillu Auto-Formatter")
+        return embed
+
     match = re.search(r'whitelisted player\(s\):\s*([^\n\r]+)', content, re.IGNORECASE)
     if not match:
         return None
@@ -1697,7 +1708,7 @@ def format_whitelisted_players_embed(content: str) -> Optional[discord.Embed]:
             other_fields.append(chunk)
 
         for idx, f_text in enumerate(other_fields):
-            fname = f"📱 Other Characters / Bedrock [{len(other_players)}]" if idx == 0 else "📱 Other Characters (Cont.)"
+            fname = f"📱 Bedrock / Other Characters [{len(other_players)}]" if idx == 0 else "📱 Bedrock / Other Characters (Cont.)"
             embed.add_field(name=fname, value=f_text, inline=False)
 
     embed.set_footer(text="Arranged Alphabetically (A–Z) followed by Symbols • Tillu Auto-Formatter")
@@ -1706,9 +1717,13 @@ def format_whitelisted_players_embed(content: str) -> Optional[discord.Embed]:
 @bot.event
 async def on_message(message: discord.Message):
     # ── CONSOLE CHANNEL: Intercept & Format 'whitelist list' output ───────────
-    if "whitelisted player(s):" in message.content.lower():
+    raw_text = message.content or ""
+    if not raw_text and message.embeds:
+        raw_text = " ".join([e.description or "" for e in message.embeds if e.description])
+
+    if "whitelisted player" in raw_text.lower():
         if message.channel.id == CONSOLE_CHANNEL_ID or (bot.user and message.author.id == bot.user.id):
-            embed = format_whitelisted_players_embed(message.content)
+            embed = format_whitelisted_players_embed(raw_text)
             if embed:
                 try:
                     await message.delete()
