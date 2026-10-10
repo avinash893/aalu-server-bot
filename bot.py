@@ -408,7 +408,6 @@ async def execute_whitelist_command(ign: str) -> bool:
         await execute_server_command(f'whitelist add "{clean_ign}"')
     if not clean_ign.startswith(".") and " " not in clean_ign:
         await execute_server_command(f"whitelist add .{clean_ign}")
-    await execute_server_command(f"fwd:whitelist add {clean_ign}")
     await execute_server_command("whitelist reload")
     try:
         wch = bot.get_channel(WHITELIST_CHANNEL_ID)
@@ -426,7 +425,6 @@ async def execute_unwhitelist_command(ign: str) -> bool:
         await execute_server_command(f'whitelist remove "{clean_ign}"')
     if not clean_ign.startswith(".") and " " not in clean_ign:
         await execute_server_command(f"whitelist remove .{clean_ign}")
-    await execute_server_command(f"fwd:whitelist remove {clean_ign}")
     await execute_server_command("whitelist reload")
     return True
 
@@ -442,7 +440,6 @@ def send_whitelist_command(ign: str) -> bool:
         panel_send_command(f"whitelist add {clean_ign}")
         if " " in clean_ign:
             panel_send_command(f'whitelist add "{clean_ign}"')
-        panel_send_command(f"fwd:whitelist add {clean_ign}")
         panel_send_command("whitelist reload")
         return True
     except Exception:
