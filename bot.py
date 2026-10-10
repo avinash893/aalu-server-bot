@@ -327,30 +327,64 @@ def panel_get_status() -> dict:
 def send_pterodactyl_start():
     return panel_power_action("start")
 
-async def execute_server_command(command: str) -> tuple[bool, str]:
-    """Execute command directly via DiscordSRV console channel and panel MCP."""
-    cmd = command.strip().lstrip('/')
-    dispatched_console = False
+_console_webhook = None
 
-    # 1. Route directly into DiscordSRV console channel (#🎚️console)
+async def get_console_webhook():
+    """Get or create Discord webhook for console channel to bypass bot self-filtering."""
+    global _console_webhook
+    if _console_webhook:
+        return _console_webhook
+
     try:
         ch = bot.get_channel(CONSOLE_CHANNEL_ID)
-        if ch:
-            await ch.send(cmd)
-            dispatched_console = True
-            logging.info(f"[Console Dispatch] Sent `{cmd}` to #{ch.name} ({CONSOLE_CHANNEL_ID})")
-    except Exception as e:
-        logging.warning(f"[Console Dispatch] DiscordSRV channel send notice: {e}")
+        if not ch:
+            try:
+                ch = await bot.fetch_channel(CONSOLE_CHANNEL_ID)
+            except Exception:
+                ch = None
 
-    # 2. Also dispatch via minecraftmcp panel
+        if ch and hasattr(ch, "webhooks"):
+            hooks = await ch.webhooks()
+            for h in hooks:
+                if h.name in ["TilluConsoleBridge", "Tillu Bridge", "ConsoleBridge"]:
+                    _console_webhook = h
+                    return _console_webhook
+            _console_webhook = await ch.create_webhook(name="TilluConsoleBridge")
+            return _console_webhook
+    except Exception as e:
+        logging.warning(f"[Console Webhook] Notice: {e}")
+    return None
+
+async def execute_server_command(command: str) -> tuple[bool, str]:
+    """Execute command directly on Minecraft server console."""
+    cmd = command.strip().lstrip('/')
+    dispatched = False
+
+    # 1. Dispatch via DiscordSRV Console Webhook (Bypasses self-bot filter so DiscordSRV executes it!)
+    try:
+        hook = await get_console_webhook()
+        if hook:
+            await hook.send(content=cmd)
+            dispatched = True
+            logging.info(f"[Console Dispatch via Webhook] Dispatched `{cmd}` to #{CONSOLE_CHANNEL_ID}")
+        else:
+            ch = bot.get_channel(CONSOLE_CHANNEL_ID)
+            if ch:
+                await ch.send(cmd)
+                dispatched = True
+                logging.info(f"[Console Dispatch via Channel] Dispatched `{cmd}` to #{ch.name}")
+    except Exception as e:
+        logging.warning(f"[Console Dispatch] Webhook/Channel notice: {e}")
+
+    # 2. Also dispatch via minecraftmcp panel / bridge if available
     try:
         panel_ok, panel_resp = await asyncio.to_thread(panel_send_command, cmd)
         if panel_ok:
             return True, str(panel_resp)
     except Exception as pe:
-        logging.warning(f"[Console Dispatch] minecraftmcp panel notice: {pe}")
+        logging.warning(f"[Console Dispatch] panel notice: {pe}")
 
-    if dispatched_console:
+    if dispatched:
         return True, f"Dispatched to <#{CONSOLE_CHANNEL_ID}>"
     return False, "Failed to dispatch command"
 
@@ -370,6 +404,10 @@ async def execute_whitelist_command(ign: str) -> bool:
     """Execute whitelist commands for a player IGN across console and panel."""
     clean_ign = ign.strip()
     await execute_server_command(f"whitelist add {clean_ign}")
+    if " " in clean_ign:
+        await execute_server_command(f'whitelist add "{clean_ign}"')
+    if not clean_ign.startswith(".") and " " not in clean_ign:
+        await execute_server_command(f"whitelist add .{clean_ign}")
     await execute_server_command(f"fwd:whitelist add {clean_ign}")
     await execute_server_command("whitelist reload")
     try:
@@ -378,6 +416,18 @@ async def execute_whitelist_command(ign: str) -> bool:
             await wch.send(f"🎟️ Whitelist registered: `{clean_ign}`")
     except Exception:
         pass
+    return True
+
+async def execute_unwhitelist_command(ign: str) -> bool:
+    """Execute unwhitelist commands for a player IGN across console and panel."""
+    clean_ign = ign.strip()
+    await execute_server_command(f"whitelist remove {clean_ign}")
+    if " " in clean_ign:
+        await execute_server_command(f'whitelist remove "{clean_ign}"')
+    if not clean_ign.startswith(".") and " " not in clean_ign:
+        await execute_server_command(f"whitelist remove .{clean_ign}")
+    await execute_server_command(f"fwd:whitelist remove {clean_ign}")
+    await execute_server_command("whitelist reload")
     return True
 
 def send_whitelist_command(ign: str) -> bool:
@@ -390,6 +440,8 @@ def send_whitelist_command(ign: str) -> bool:
             pass
     try:
         panel_send_command(f"whitelist add {clean_ign}")
+        if " " in clean_ign:
+            panel_send_command(f'whitelist add "{clean_ign}"')
         panel_send_command(f"fwd:whitelist add {clean_ign}")
         panel_send_command("whitelist reload")
         return True
@@ -1284,9 +1336,7 @@ async def slash_unwhitelist(interaction: discord.Interaction, player: str):
         await interaction.response.send_message("🚫 Only Server Owner, Admins, and Moderators can remove whitelist!", ephemeral=True)
         return
     clean_p = player.strip()
-    await execute_server_command(f"whitelist remove {clean_p}")
-    await execute_server_command(f"fwd:whitelist remove {clean_p}")
-    await execute_server_command("whitelist reload")
+    await execute_unwhitelist_command(clean_p)
     reg = load_whitelist_registry()
     new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower() != clean_p.lower()}
     save_whitelist_registry(new_reg)
@@ -1486,9 +1536,7 @@ async def cmd_unwhitelist(ctx, player: str = None):
         await ctx.send("❌ Usage: `!unwhitelist <player>`")
         return
     clean_p = player.strip()
-    await execute_server_command(f"whitelist remove {clean_p}")
-    await execute_server_command(f"fwd:whitelist remove {clean_p}")
-    await execute_server_command("whitelist reload")
+    await execute_unwhitelist_command(clean_p)
     reg = load_whitelist_registry()
     new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower() != clean_p.lower()}
     save_whitelist_registry(new_reg)
