@@ -1036,6 +1036,11 @@ async def handle_whitelist_request(interaction_or_ctx, ign: str, user, guild=Non
 
     clean_ign = ign.strip().replace('"', '').replace("'", '').replace("`", "")
 
+    if clean_ign.lower() in ["list", "show", "all"]:
+        await execute_server_command("whitelist list")
+        await reply_fn("🔍 **[Whitelist List]** Fetching live player list from server console...")
+        return
+
     # Strict Safety Guardrail: Prevent harmful commands or ban attempts
     harmful_tokens = ["ban", "kick", "op", "deop", "kill", "stop", "clear", "gamemode", "sudo", "execute", "eval", "pardon"]
     if any(h in clean_ign.lower().split() for h in harmful_tokens):
@@ -1637,8 +1642,84 @@ async def on_member_join(member: discord.Member):
         except Exception as e:
             logging.error(f"[on_member_join] Error sending welcome: {e}")
 
+def format_whitelisted_players_embed(content: str) -> Optional[discord.Embed]:
+    """Parse raw console whitelist output and format arranged by alphabet first, then other characters."""
+    match = re.search(r'whitelisted player\(s\):\s*([^\n\r]+)', content, re.IGNORECASE)
+    if not match:
+        return None
+
+    raw_list = re.sub(r'[\r\n`]+', '', match.group(1)).strip()
+    players = [p.strip() for p in raw_list.split(',') if p.strip()]
+    if not players:
+        return None
+
+    # Deduplicate while preserving case
+    unique_players = list(dict.fromkeys(players))
+
+    # Arrange: Alphabetical (A-Z) first, then other characters/symbols (e.g. '.', '_', digits)
+    alpha_players = sorted([p for p in unique_players if p and p[0].isalpha()], key=lambda x: x.lower())
+    other_players = sorted([p for p in unique_players if p and not p[0].isalpha()], key=lambda x: x.lower())
+
+    embed = discord.Embed(
+        title=f"📋 Whitelisted Players ({len(unique_players)} Total)",
+        color=0x2ECC71,
+        timestamp=discord.utils.utcnow()
+    )
+
+    if alpha_players:
+        chunk = ""
+        alpha_fields = []
+        for p in alpha_players:
+            item = f"`{p}` "
+            if len(chunk) + len(item) > 1000:
+                alpha_fields.append(chunk)
+                chunk = item
+            else:
+                chunk += item
+        if chunk:
+            alpha_fields.append(chunk)
+
+        for idx, f_text in enumerate(alpha_fields):
+            fname = f"🔤 Alphabetical (A–Z) [{len(alpha_players)}]" if idx == 0 else "🔤 Alphabetical (Cont.)"
+            embed.add_field(name=fname, value=f_text, inline=False)
+
+    if other_players:
+        chunk = ""
+        other_fields = []
+        for p in other_players:
+            item = f"`{p}` "
+            if len(chunk) + len(item) > 1000:
+                other_fields.append(chunk)
+                chunk = item
+            else:
+                chunk += item
+        if chunk:
+            other_fields.append(chunk)
+
+        for idx, f_text in enumerate(other_fields):
+            fname = f"📱 Other Characters / Bedrock [{len(other_players)}]" if idx == 0 else "📱 Other Characters (Cont.)"
+            embed.add_field(name=fname, value=f_text, inline=False)
+
+    embed.set_footer(text="Arranged Alphabetically (A–Z) followed by Symbols • Tillu Auto-Formatter")
+    return embed
+
 @bot.event
 async def on_message(message: discord.Message):
+    # ── CONSOLE CHANNEL: Intercept & Format 'whitelist list' output ───────────
+    if "whitelisted player(s):" in message.content.lower():
+        if message.channel.id == CONSOLE_CHANNEL_ID or (bot.user and message.author.id == bot.user.id):
+            embed = format_whitelisted_players_embed(message.content)
+            if embed:
+                try:
+                    await message.delete()
+                except Exception as de:
+                    logging.warning(f"[Whitelist Formatter] Could not delete raw message: {de}")
+                try:
+                    await message.channel.send(embed=embed)
+                except Exception as se:
+                    logging.error(f"[Whitelist Formatter] Error sending embed: {se}")
+                return
+
     # Only ignore Tillu himself to prevent self-looping (allow access/interaction with other bots)
     if bot.user and message.author.id == bot.user.id:
         return
