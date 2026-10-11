@@ -1,6 +1,6 @@
 {
-  "updated_at": "2026-10-11T13:36:46Z",
-  "count": 11,
+  "updated_at": "2026-10-11T13:37:52Z",
+  "count": 12,
   "memories": {
     "server_owner_is_avinash_aalu": {
       "topic": "server_owner_is_avinash_aalu",
@@ -67,6 +67,12 @@
       "content": "Remove past chats and only keep memory and rules updates here; delete user chat for simple messages without remember notes or skills.",
       "updated_by": "avinashshah (Owner)",
       "updated_at": "2026-10-11 13:36:46 UTC"
+    },
+    "chat_purge_policy_all": {
+      "topic": "chat_purge_policy_all",
+      "content": "Apply chat purge policy for all users including owner, admins, and members.",
+      "updated_by": "avinashshah (Owner)",
+      "updated_at": "2026-10-11 13:37:52 UTC"
     }
   }
 }
