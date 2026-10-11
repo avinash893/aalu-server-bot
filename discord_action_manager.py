@@ -97,8 +97,12 @@ async def parse_and_execute_discord_action(
     # 2. GIVE / ADD ROLE  (also handles: "create role X and add Y to it")
     # e.g., "tillu give role VIP to @user", "create role Creators and add uniqueumar to it"
     add_role_match = re.search(r'(?:give|add|assign|de\s+do)\s+(?:role\s+)?["\']?([^"\'@<>\n]+?)["\']?\s+(?:role\s+)?to\s+(.+)', text, re.IGNORECASE)
-    # Also handle "create role X and add Y to it"
-    compound_match = re.search(r'create\s+(?:a\s+)?(?:new\s+)?role\s+(?:named?\s+)?["\']?([^"\']+)["\']?\s+and\s+(?:add|give)\s+(.+?)\s+to\s+(?:it|that role)', text, re.IGNORECASE)
+    # Handle "create role X and add Y to it" — with re.DOTALL to cross newlines
+    compound_match = re.search(
+        r'create\s+(?:a\s+)?(?:new\s+)?role\s+(?:named?\s+)?["\']?([^"\':\n]+)["\']?'
+        r'[\s\S]{0,60}?(?:add|give)\s+(.+?)\s+to\s+(?:it|that\s+role)',
+        text, re.IGNORECASE | re.DOTALL
+    )
     if compound_match:
         add_role_match = compound_match  # treat same way
 

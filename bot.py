@@ -2083,8 +2083,15 @@ async def on_message(message: discord.Message):
 
     # ── AUTONOMOUS DISCORD MANAGEMENT ACTIONS (Roles, Channels, Message Deletions, Timeouts) ──
     if is_privileged_user(message.author, message.guild):
-        handled, resp = await parse_and_execute_discord_action(message, message.author, message.guild, message.content)
+        # Strip "tillu" prefix so regex patterns match cleanly
+        action_text = re.sub(r'^(?:hey\s+)?(?:tillu|mr\.?\s*tillu)[,\s]*', '', message.content, flags=re.IGNORECASE).strip()
+        # Also normalize "named:-" / "named :-" / "named:" to "named "
+        action_text = re.sub(r'\bnamed?\s*[:\-]+\s*', 'named ', action_text, flags=re.IGNORECASE)
+        action_text = re.sub(r'\bcalled?\s*[:\-]+\s*', 'called ', action_text, flags=re.IGNORECASE)
+        handled, resp = await parse_and_execute_discord_action(message, message.author, message.guild, action_text)
         if handled:
+            if resp:
+                await message.channel.send(resp)
             return
 
 
