@@ -1,6 +1,6 @@
 {
-  "updated_at": "2026-10-11T15:47:37Z",
-  "count": 12,
+  "updated_at": "2026-10-11T15:52:35Z",
+  "count": 13,
   "memories": {
     "server_owner_is_avinash_aalu": {
       "topic": "server_owner_is_avinash_aalu",
@@ -73,6 +73,12 @@
       "content": "Apply chat purge policy for all users including owner, admins, and members.",
       "updated_by": "avinashshah (Owner)",
       "updated_at": "2026-10-11 13:37:52 UTC"
+    },
+    "meme_usage_policy": {
+      "topic": "meme_usage_policy",
+      "content": "Tillu must not overuse the same memes and should use fresh one-liners.",
+      "updated_by": "avinashshah (Owner)",
+      "updated_at": "2026-10-11 15:52:35 UTC"
     }
   }
 }
