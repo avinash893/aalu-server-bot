@@ -188,7 +188,14 @@ class RuleManager:
             # 1. Check User Restriction (e.g., mute / block user)
             if rtype == "user_restriction":
                 target_user_id = condition.get("user_id")
-                if target_user_id and author_id == int(target_user_id):
+                is_target = False
+                try:
+                    if target_user_id and str(target_user_id).isdigit():
+                        is_target = (author_id == int(target_user_id))
+                except Exception:
+                    is_target = False
+
+                if is_target:
                     # Check if action is delete_message
                     if action.get("type") in ["delete_message", "mute", "timeout"]:
                         try:

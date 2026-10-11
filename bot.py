@@ -94,9 +94,9 @@ if not GROQ_API_KEYS and GROQ_API_KEY:
     GROQ_API_KEYS = [GROQ_API_KEY]
 
 GROQ_MODELS = [
+    "openai/gpt-oss-20b",
     "qwen/qwen3.8-27b",
-    "openai/gpt-oss-120b",
-    "openai/gpt-oss-20b"
+    "openai/gpt-oss-120b"
 ]
 
 # ── AUTONOMOUS RULE & SKILL ENGINE (WITH GITHUB CLOUD AUTO-SYNC) ───────────
@@ -599,8 +599,8 @@ def query_groq(prompt: str, system_instruction: str = None, max_tokens: int = 60
                         if content and content.strip():
                             return content.strip()
                 elif r.status_code == 429:
-                    logging.warning(f"Groq key rate limited on {model}, trying next key...")
-                    break
+                    logging.warning(f"Groq {model} rate limited, trying next model...")
+                    continue
                 else:
                     logging.warning(f"Groq {model} HTTP {r.status_code}: {r.text[:120]}")
             except Exception as e:
