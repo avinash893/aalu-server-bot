@@ -163,7 +163,105 @@ async def parse_and_execute_discord_action(
         except Exception as e:
             return True, f"⚠️ Channel unlock error: {e}"
 
-    # 7. TIMEOUT / MUTE USER
+    # 7. RENAME CHANNEL
+    # e.g., "rename channel #test to announcement", "rename this channel to chill-chat"
+    rename_match = re.search(r'rename\s+(?:this\s+channel|channel\s+(?:<#(\d+)>|([a-zA-Z0-9_\-]+)))\s+(?:to\s+)?([a-zA-Z0-9_\-]+)', clean_text)
+    if rename_match:
+        ch_id = rename_match.group(1)
+        ch_name = rename_match.group(2)
+        new_name = rename_match.group(3)
+        target_ch = message.channel
+        if ch_id:
+            target_ch = guild.get_channel(int(ch_id)) or message.channel
+        elif ch_name:
+            target_ch = discord.utils.find(lambda c: c.name.lower() == ch_name.lower(), guild.channels) or message.channel
+        try:
+            old = target_ch.name
+            await target_ch.edit(name=new_name, reason=f"Renamed by Tillu via {author.name}")
+            return True, f"✏️ **Channel Renamed!** `#{old}` ka naam badal kar `#{new_name}` kar diya gaya hai!"
+        except Exception as e:
+            return True, f"⚠️ Channel rename error: {e}"
+
+    # 8. SET CHANNEL TOPIC
+    # e.g., "set topic of this channel to Official Discussion", "set topic of #general to Welcome everyone"
+    topic_match = re.search(r'set\s+topic\s+(?:of\s+(?:this\s+channel|channel\s+(?:<#(\d+)>|([a-zA-Z0-9_\-]+))))?\s*(?:to\s+)?(.+)', text, re.IGNORECASE)
+    if topic_match and "topic" in clean_text:
+        ch_id = topic_match.group(1)
+        ch_name = topic_match.group(2)
+        new_topic = topic_match.group(3).strip()
+        target_ch = message.channel
+        if ch_id:
+            target_ch = guild.get_channel(int(ch_id)) or message.channel
+        elif ch_name:
+            target_ch = discord.utils.find(lambda c: c.name.lower() == ch_name.lower(), guild.channels) or message.channel
+        if isinstance(target_ch, discord.TextChannel):
+            try:
+                await target_ch.edit(topic=new_topic, reason=f"Topic updated by Tillu via {author.name}")
+                return True, f"📝 **Channel Topic Updated!** {target_ch.mention} ka topic update ho gaya: `{new_topic}`"
+            except Exception as e:
+                return True, f"⚠️ Topic update error: {e}"
+
+    # 9. SET SLOWMODE
+    # e.g., "set slowmode to 10s", "slowmode 5 seconds", "disable slowmode"
+    slowmode_match = re.search(r'(?:set\s+)?slowmode\s+(?:to\s+)?(\d+)\s*(?:s|sec|seconds?)?', clean_text)
+    if slowmode_match:
+        delay = int(slowmode_match.group(1))
+        if isinstance(message.channel, discord.TextChannel):
+            try:
+                await message.channel.edit(slowmode_delay=delay, reason=f"Slowmode set by Tillu via {author.name}")
+                if delay == 0:
+                    return True, "⚡ **Slowmode Disabled!** Is channel me slowmode hata diya gaya hai."
+                return True, f"⏱️ **Slowmode Set!** Is channel me `{delay}` seconds ka slowmode laga diya gaya hai."
+            except Exception as e:
+                return True, f"⚠️ Slowmode error: {e}"
+    elif any(p in clean_text for p in ["disable slowmode", "remove slowmode", "slowmode off"]):
+        if isinstance(message.channel, discord.TextChannel):
+            try:
+                await message.channel.edit(slowmode_delay=0, reason=f"Slowmode removed by Tillu via {author.name}")
+                return True, "⚡ **Slowmode Disabled!** Slowmode hata diya gaya hai."
+            except Exception as e:
+                return True, f"⚠️ Slowmode disable error: {e}"
+
+    # 10. HIDE / UNHIDE CHANNEL
+    if any(p in clean_text for p in ["hide this channel", "hide channel", "channel chupao"]):
+        try:
+            await message.channel.set_permissions(guild.default_role, view_channel=False, reason=f"Hidden by Tillu via {author.name}")
+            return True, "👁️‍🗨️ **Channel Hidden!** Normal members ab is channel ko nahi dekh sakte."
+        except Exception as e:
+            return True, f"⚠️ Hide channel error: {e}"
+
+    if any(p in clean_text for p in ["unhide this channel", "unhide channel", "channel dikhao"]):
+        try:
+            await message.channel.set_permissions(guild.default_role, view_channel=True, reason=f"Unhidden by Tillu via {author.name}")
+            return True, "👁️ **Channel Visible!** Normal members ab is channel ko dekh sakte hain."
+        except Exception as e:
+            return True, f"⚠️ Unhide channel error: {e}"
+
+    # 11. CREATE CATEGORY
+    # e.g., "create category Staff Zone", "create category Gaming"
+    cat_match = re.search(r'create\s+category\s+["\']?([^"\']+)["\']?', clean_text)
+    if cat_match:
+        cat_name = cat_match.group(1).strip()
+        try:
+            new_cat = await guild.create_category(name=cat_name, reason=f"Created by Tillu via {author.name}")
+            return True, f"📂 **Category Created!** Nayi category `{new_cat.name}` ban gayi hai!"
+        except Exception as e:
+            return True, f"⚠️ Category create error: {e}"
+
+    # 12. CLONE CHANNEL
+    # e.g., "clone channel #general", "clone this channel"
+    if "clone" in clean_text and "channel" in clean_text:
+        target_ch = message.channel
+        ch_m = re.search(r'<#(\d+)>', clean_text)
+        if ch_m:
+            target_ch = guild.get_channel(int(ch_m.group(1))) or message.channel
+        try:
+            cloned = await target_ch.clone(reason=f"Cloned by Tillu via {author.name}")
+            return True, f"👥 **Channel Cloned!** Duplicate channel {cloned.mention} create kar diya gaya hai!"
+        except Exception as e:
+            return True, f"⚠️ Clone error: {e}"
+
+    # 13. TIMEOUT / MUTE USER
     # e.g., "tillu mute @user for 10 minutes", "tillu timeout @user 15m"
     timeout_match = re.search(r'(?:timeout|mute|chup\s+kara\s+do)\s+(.+?)(?:\s+(?:for\s+)?(\d{1,4})\s*(?:m|min|minutes?))?$', text, re.IGNORECASE)
     if timeout_match and (message.mentions or re.search(r'\d{17,20}', text)):
@@ -183,3 +281,4 @@ async def parse_and_execute_discord_action(
                 return True, f"⚠️ Timeout error: {e}"
 
     return False, None
+
