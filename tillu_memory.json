@@ -1,6 +1,6 @@
 {
-  "updated_at": "2026-10-11T08:23:02Z",
-  "count": 9,
+  "updated_at": "2026-10-11T13:14:33Z",
+  "count": 10,
   "memories": {
     "server_owner_is_avinash_aalu": {
       "topic": "server_owner_is_avinash_aalu",
@@ -55,6 +55,12 @@
       "content": "gamerggp is Admin, uniqueumar114 is Moderator, there is no co-owner, Avinash is sole Owner.",
       "updated_by": "gamerggp (Staff)",
       "updated_at": "2026-10-11 08:23:02 UTC"
+    },
+    "curse_word_policy": {
+      "topic": "curse_word_policy",
+      "content": "If any user uses curse words, give them a warning and delete their curse message up to 5 times. After 5 times, raise a ticket to Avinash to ban the member.",
+      "updated_by": "avinashshah (Owner)",
+      "updated_at": "2026-10-11 13:14:33 UTC"
     }
   }
 }
