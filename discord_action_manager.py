@@ -27,6 +27,34 @@ async def parse_and_execute_discord_action(
 
     clean_text = text.lower().strip()
 
+    # ── HELPER: Fuzzy member finder ──────────────────────────────────────────
+    def find_member_fuzzy(query: str) -> discord.Member | None:
+        """Find member by mention, ID, exact name, nick, or partial name (case-insensitive)."""
+        if message.mentions:
+            return message.mentions[0]
+        clean_q = re.sub(r'[^a-zA-Z0-9]', '', query).lower()
+        # Exact match first
+        for m in guild.members:
+            nm = re.sub(r'[^a-zA-Z0-9]', '', m.name).lower()
+            nk = re.sub(r'[^a-zA-Z0-9]', '', m.nick or '').lower()
+            if str(m.id) == clean_q or nm == clean_q or nk == clean_q:
+                return m
+        # Partial match fallback
+        for m in guild.members:
+            nm = re.sub(r'[^a-zA-Z0-9]', '', m.name).lower()
+            nk = re.sub(r'[^a-zA-Z0-9]', '', m.nick or '').lower()
+            if clean_q in nm or clean_q in nk or nm in clean_q:
+                return m
+        return None
+
+    # ── HELPER: Fuzzy role finder ─────────────────────────────────────────────
+    def find_role_fuzzy(query: str) -> discord.Role | None:
+        q = query.lower().strip()
+        return (
+            discord.utils.find(lambda r: r.name.lower() == q, guild.roles) or
+            discord.utils.find(lambda r: q in r.name.lower(), guild.roles)
+        )
+
     # 1. PURGE / DELETE MESSAGES
     # e.g., "tillu delete 10 messages", "tillu purge 20 messages", "delete last 5 chats"
     purge_match = re.search(r'(?:delete|purge|remove|saaf\s+kar\s+do)\s+(?:last\s+)?(\d{1,3})\s+(?:messages?|chats?|msg)', clean_text)
@@ -48,42 +76,58 @@ async def parse_and_execute_discord_action(
             await message.channel.send(err)
             return True, err
 
-    # 2. GIVE / ADD ROLE
-    # e.g., "tillu give role VIP to @user", "tillu add role Member to @user"
-    add_role_match = re.search(r'(?:give|add|de\s+do)\s+role\s+["\']?([^"\']+)["\']?\s+to\s+(.+)', text, re.IGNORECASE)
+    # 1a. CREATE ROLE (without assigning)
+    # e.g., "create role Creators", "tillu create a role named VIP", "make role Creators"
+    create_role_match = re.search(r'(?:create|make|bana)\s+(?:a\s+)?(?:new\s+)?role\s+(?:named?\s+|called?\s+)?["\']?([^"\']+)["\']?', clean_text)
+    if create_role_match and not re.search(r'(?:give|add|assign)', clean_text):
+        role_name = create_role_match.group(1).strip().title()
+        existing = find_role_fuzzy(role_name)
+        if existing:
+            return True, f"ℹ️ Role `{existing.name}` pehle se exist karta hai! Use karna ho to assign karo."
+        try:
+            new_role = await guild.create_role(
+                name=role_name,
+                mentionable=True,
+                reason=f"Created by Tillu via {author.name}"
+            )
+            return True, f"🎭 **Role Created!** Naya role `{new_role.name}` ban gaya hai! Assign karne ke liye bolna: `tillu give role {new_role.name} to @user`"
+        except Exception as e:
+            return True, f"⚠️ Role create error: {e}"
+
+    # 2. GIVE / ADD ROLE  (also handles: "create role X and add Y to it")
+    # e.g., "tillu give role VIP to @user", "create role Creators and add uniqueumar to it"
+    add_role_match = re.search(r'(?:give|add|assign|de\s+do)\s+(?:role\s+)?["\']?([^"\'@<>\n]+?)["\']?\s+(?:role\s+)?to\s+(.+)', text, re.IGNORECASE)
+    # Also handle "create role X and add Y to it"
+    compound_match = re.search(r'create\s+(?:a\s+)?(?:new\s+)?role\s+(?:named?\s+)?["\']?([^"\']+)["\']?\s+and\s+(?:add|give)\s+(.+?)\s+to\s+(?:it|that role)', text, re.IGNORECASE)
+    if compound_match:
+        add_role_match = compound_match  # treat same way
+
     if add_role_match:
         role_query = add_role_match.group(1).strip()
         target_query = add_role_match.group(2).strip()
 
-        # Find member
-        target_member = None
-        if message.mentions:
-            target_member = message.mentions[0]
-        else:
-            # Search by name/id
-            clean_t = re.sub(r'[^a-zA-Z0-9]', '', target_query).lower()
-            for m in guild.members:
-                if str(m.id) == clean_t or m.name.lower() == clean_t or (m.nick and m.nick.lower() == clean_t):
-                    target_member = m
-                    break
-
-        if not target_member:
-            return True, f"❌ Member `{target_query}` nahi mila!"
-
-        # Find role
-        role = discord.utils.find(lambda r: r.name.lower() == role_query.lower(), guild.roles)
+        # Find or create role
+        role = find_role_fuzzy(role_query) or find_role_fuzzy(role_query.title())
         if not role:
-            # Try to create role if not existing
             try:
-                role = await guild.create_role(name=role_query, reason=f"Created by Tillu on request of {author.name}")
+                role = await guild.create_role(
+                    name=role_query.title(),
+                    mentionable=True,
+                    reason=f"Auto-created by Tillu via {author.name}"
+                )
             except Exception as re_err:
-                return True, f"❌ Role `{role_query}` exist nahi karta aur create nahi ho paya: {re_err}"
+                return True, f"❌ Role `{role_query}` create nahi hua: {re_err}"
+
+        # Find member (fuzzy)
+        target_member = find_member_fuzzy(target_query)
+        if not target_member:
+            return True, f"❌ Member `{target_query}` nahi mila! @mention karke try karo."
 
         try:
             await target_member.add_roles(role, reason=f"Assigned by Tillu via {author.name}")
-            return True, f"✅ **Role Assigned!** `{role.name}` role {target_member.mention} ko de diya gaya hai! 🎉"
+            return True, f"✅ **Done Boss!** `{role.name}` role {target_member.mention} ko de diya gaya hai! 🎉"
         except Exception as e:
-            return True, f"⚠️ Role assign karne me error: {e}"
+            return True, f"⚠️ Role assign error: {e}"
 
     # 3. REMOVE ROLE
     # e.g., "tillu remove role VIP from @user"
@@ -92,13 +136,7 @@ async def parse_and_execute_discord_action(
         role_query = rem_role_match.group(1).strip()
         target_query = rem_role_match.group(2).strip()
 
-        target_member = message.mentions[0] if message.mentions else None
-        if not target_member:
-            clean_t = re.sub(r'[^a-zA-Z0-9]', '', target_query).lower()
-            for m in guild.members:
-                if str(m.id) == clean_t or m.name.lower() == clean_t:
-                    target_member = m
-                    break
+        target_member = find_member_fuzzy(target_query)
 
         if not target_member:
             return True, f"❌ Member `{target_query}` nahi mila!"
@@ -114,6 +152,60 @@ async def parse_and_execute_discord_action(
             return True, f"⚠️ Role remove karne me error: {e}"
 
     # 4. CREATE CHANNEL
+    # 3b. SET CHANNEL PERMISSIONS BY ROLE (restrict posting to specific roles)
+    # e.g., "only moderator or above can post in server clips"
+    # e.g., "restrict posting in #clips to mods and admins"
+    # e.g., "set server-clips so only moderators can post"
+    restrict_match = re.search(
+        r'(?:only|restrict|lock|set)\s+(?:posting\s+(?:in\s+)?|messages?\s+(?:in\s+)?)?'
+        r'(?:(?:<#(\d+)>|#?([a-zA-Z0-9_\-]+))\s+)?'
+        r'(?:to\s+|for\s+|so\s+only\s+)?'
+        r'([a-zA-Z0-9\s,\+&]+?)\s*(?:and\s+above\s+)?(?:can\s+post|can\s+send|only|channel)?',
+        clean_text, re.IGNORECASE
+    )
+    # simpler pattern to catch "only moderator or above can post in server clips"
+    restrict_simple = re.search(
+        r'(?:only\s+)?(.+?)\s+(?:or\s+above\s+)?(?:can|to)\s+(?:post|send|write)\s+in\s+(?:<#(\d+)>|#?([a-zA-Z0-9_\-]+))',
+        clean_text, re.IGNORECASE
+    )
+    if restrict_simple:
+        roles_text = restrict_simple.group(1).strip()
+        ch_id = restrict_simple.group(2)
+        ch_name_q = restrict_simple.group(3)
+
+        # Find target channel
+        target_ch = message.channel
+        if ch_id:
+            target_ch = guild.get_channel(int(ch_id)) or message.channel
+        elif ch_name_q:
+            found_ch = discord.utils.find(lambda c: c.name.lower().replace('-', '').replace('_', '') == ch_name_q.lower().replace('-', '').replace('_', ''), guild.channels)
+            if found_ch:
+                target_ch = found_ch
+
+        if not isinstance(target_ch, (discord.TextChannel, discord.ForumChannel)):
+            pass  # skip if not text
+        else:
+            try:
+                # Step 1: Block @everyone from sending messages
+                await target_ch.set_permissions(guild.default_role, send_messages=False, reason=f"Restricted by Tillu via {author.name}")
+
+                # Step 2: Allow privileged roles to send
+                allowed_keywords = ['mod', 'moderator', 'admin', 'administrator', 'owner', 'staff', 'creator']
+                granted = []
+                for role in guild.roles:
+                    rname = role.name.lower()
+                    if any(kw in rname for kw in allowed_keywords):
+                        await target_ch.set_permissions(role, send_messages=True, reason=f"Granted by Tillu via {author.name}")
+                        granted.append(role.name)
+
+                if granted:
+                    return True, f"🔐 **Done Boss!** {target_ch.mention} ab sirf **{', '.join(granted)}** wale post kar sakte hain. Normal members ke liye send locked hai. ✅"
+                else:
+                    return True, f"⚠️ Koi matching privileged role nahi mila, lekin @everyone ka send_messages block kar diya gaya hai {target_ch.mention} me."
+            except Exception as e:
+                return True, f"⚠️ Channel permissions set karne me error: {e}"
+
+    # 4. CREATE CHANNEL
     # e.g., "tillu create channel welcome-rules", "tillu create voice channel Gaming"
     create_ch_match = re.search(r'create\s+(?:(text|voice)\s+)?channel\s+["\']?([a-zA-Z0-9_\-]+)["\']?', clean_text)
     if create_ch_match:
@@ -127,6 +219,7 @@ async def parse_and_execute_discord_action(
             return True, f"📁 **Channel Created!** Naya channel {new_ch.mention} ban gaya hai! 🚀"
         except Exception as e:
             return True, f"⚠️ Channel create karne me error: {e}"
+
 
     # 5. DELETE CHANNEL
     # e.g., "tillu delete channel #test" or "delete channel old-chat"
