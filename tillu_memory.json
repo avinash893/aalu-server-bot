@@ -1,6 +1,6 @@
 {
-  "updated_at": "2026-10-11T13:14:33Z",
-  "count": 10,
+  "updated_at": "2026-10-11T13:36:46Z",
+  "count": 11,
   "memories": {
     "server_owner_is_avinash_aalu": {
       "topic": "server_owner_is_avinash_aalu",
@@ -61,6 +61,12 @@
       "content": "If any user uses curse words, give them a warning and delete their curse message up to 5 times. After 5 times, raise a ticket to Avinash to ban the member.",
       "updated_by": "avinashshah (Owner)",
       "updated_at": "2026-10-11 13:14:33 UTC"
+    },
+    "chat_purge_policy": {
+      "topic": "chat_purge_policy",
+      "content": "Remove past chats and only keep memory and rules updates here; delete user chat for simple messages without remember notes or skills.",
+      "updated_by": "avinashshah (Owner)",
+      "updated_at": "2026-10-11 13:36:46 UTC"
     }
   }
 }
