@@ -5,12 +5,82 @@ initiated by Server Owner, Admins, and Moderators via natural language or direct
 """
 
 import re
+import json
 import datetime
 import logging
+import requests as _requests
+import os
 from typing import Optional, Tuple
 import discord
 
 logger = logging.getLogger("TilluDiscordActions")
+
+_GROQ_SYSTEM = """You are a Discord server management action classifier for Tillu bot.
+Given a natural language command from a privileged server admin/owner, extract the action as JSON.
+
+Return ONLY valid JSON. No explanation. Possible actions:
+
+{"action": "purge", "count": <number>, "channel": "<channel name or null>"}
+{"action": "create_role", "role_name": "<name>"}
+{"action": "assign_role", "role_name": "<name>", "member": "<name/mention>"}
+{"action": "create_and_assign_role", "role_name": "<name>", "member": "<name/mention>"}
+{"action": "remove_role_from_server", "role_name": "<name>"}
+{"action": "remove_role_from_member", "role_name": "<name>", "member": "<name/mention>"}
+{"action": "create_channel", "channel_name": "<name>", "type": "text|voice"}
+{"action": "delete_channel", "channel_name": "<name>"}
+{"action": "lock_channel", "channel_name": "<current or name>"}
+{"action": "unlock_channel", "channel_name": "<current or name>"}
+{"action": "restrict_posting", "channel_name": "<name>", "allowed_roles": ["moderator","admin"]}
+{"action": "rename_channel", "channel_name": "<old>", "new_name": "<new>"}
+{"action": "timeout", "member": "<name>", "minutes": <number>}
+{"action": "none"}
+
+Rules:
+- "remove the role X from discord" → remove_role_from_server
+- "remove role X from @user" → remove_role_from_member
+- "delete N messages/chats" → purge
+- "only mods can post in #channel" → restrict_posting
+- If action is not Discord-related → {"action": "none"}
+"""
+
+def _groq_classify_action(text: str) -> dict:
+    """Use Groq to classify the Discord action intent. Returns dict or {}."""
+    try:
+        import os
+        raw_keys = os.environ.get("GROQ_API_KEYS", "")
+        single = os.environ.get("GROQ_API_KEY", "")
+        keys = [k.strip() for k in raw_keys.split(",") if k.strip()] or ([single] if single else [])
+        if not keys:
+            return {}
+        models = ["llama-3.1-8b-instant", "llama3-8b-8192"]
+        for key in keys[:2]:
+            for model in models:
+                try:
+                    r = _requests.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                        json={
+                            "model": model,
+                            "messages": [
+                                {"role": "system", "content": _GROQ_SYSTEM},
+                                {"role": "user", "content": text}
+                            ],
+                            "max_tokens": 150,
+                            "temperature": 0
+                        },
+                        timeout=8
+                    )
+                    if r.status_code == 200:
+                        content = r.json()["choices"][0]["message"]["content"].strip()
+                        # Extract JSON
+                        match = re.search(r'\{.*\}', content, re.DOTALL)
+                        if match:
+                            return json.loads(match.group(0))
+                except Exception:
+                    continue
+    except Exception as e:
+        logger.warning(f"[DiscordActionAI] classify error: {e}")
+    return {}
 
 async def parse_and_execute_discord_action(
     message: discord.Message,
@@ -55,7 +125,202 @@ async def parse_and_execute_discord_action(
             discord.utils.find(lambda r: q in r.name.lower(), guild.roles)
         )
 
-    # 1. PURGE / DELETE MESSAGES
+    # ── AI-FIRST: Groq classifies action → execute structured result ──────────
+    import asyncio
+    ai_result = await asyncio.to_thread(_groq_classify_action, text)
+    ai_action = ai_result.get("action", "none")
+
+    if ai_action == "purge":
+        count = min(int(ai_result.get("count", 5)), 100)
+        # Optionally target a different channel by name
+        target_ch = message.channel
+        ch_name = ai_result.get("channel")
+        if ch_name and ch_name.lower() not in ["null", "none", "current", ""]:
+            found = discord.utils.find(lambda c: ch_name.lower() in c.name.lower(), guild.channels)
+            if found:
+                target_ch = found
+        try:
+            deleted = await target_ch.purge(limit=count + 1)
+            actual = max(len(deleted) - 1, 0)
+            conf = f"🧹 **Done Boss!** `{actual}` messages delete kar diye {target_ch.mention} se!"
+            sent = await target_ch.send(conf)
+            try:
+                await sent.delete(delay=5)
+            except Exception:
+                pass
+            return True, None  # already sent
+        except Exception as e:
+            return True, f"⚠️ Purge error: {e}"
+
+    elif ai_action in ("create_role", "create_and_assign_role"):
+        role_name = ai_result.get("role_name", "").strip().title()
+        if not role_name:
+            return False, None
+        existing = find_role_fuzzy(role_name)
+        if not existing:
+            try:
+                existing = await guild.create_role(name=role_name, mentionable=True, reason=f"Created by Tillu via {author.name}")
+            except Exception as e:
+                return True, f"⚠️ Role create error: {e}"
+        msg = f"🎭 **Role Created!** `{existing.name}` ban gaya!"
+        if ai_action == "create_and_assign_role":
+            member_q = ai_result.get("member", "")
+            target = find_member_fuzzy(member_q)
+            if target:
+                try:
+                    await target.add_roles(existing, reason=f"Assigned by Tillu via {author.name}")
+                    msg += f" Aur {target.mention} ko assign kar diya! 🎉"
+                except Exception as e:
+                    msg += f" (Role assign error: {e})"
+            else:
+                msg += f" ⚠️ Member `{member_q}` nahi mila, role create hua hai — manually assign karo."
+        return True, msg
+
+    elif ai_action == "assign_role":
+        role_name = ai_result.get("role_name", "").strip()
+        member_q = ai_result.get("member", "")
+        role = find_role_fuzzy(role_name) or find_role_fuzzy(role_name.title())
+        if not role:
+            try:
+                role = await guild.create_role(name=role_name.title(), mentionable=True, reason=f"Auto-created by Tillu via {author.name}")
+            except Exception as e:
+                return True, f"⚠️ Role nahi mila aur create nahi hua: {e}"
+        target = find_member_fuzzy(member_q)
+        if not target:
+            return True, f"❌ Member `{member_q}` nahi mila! @mention karke try karo."
+        try:
+            await target.add_roles(role, reason=f"Assigned by Tillu via {author.name}")
+            return True, f"✅ **Done!** `{role.name}` role {target.mention} ko de diya! 🎉"
+        except Exception as e:
+            return True, f"⚠️ Assign error: {e}"
+
+    elif ai_action == "remove_role_from_server":
+        role_name = ai_result.get("role_name", "").strip()
+        role = find_role_fuzzy(role_name)
+        if not role:
+            return True, f"❌ Role `{role_name}` nahi mila!"
+        try:
+            await role.delete(reason=f"Deleted by Tillu via {author.name}")
+            return True, f"🗑️ **Role Deleted!** `{role_name}` role server se delete kar diya!"
+        except Exception as e:
+            return True, f"⚠️ Role delete error: {e}"
+
+    elif ai_action == "remove_role_from_member":
+        role_name = ai_result.get("role_name", "").strip()
+        member_q = ai_result.get("member", "")
+        role = find_role_fuzzy(role_name)
+        if not role:
+            return True, f"❌ Role `{role_name}` nahi mila!"
+        target = find_member_fuzzy(member_q)
+        if not target:
+            return True, f"❌ Member `{member_q}` nahi mila!"
+        try:
+            await target.remove_roles(role, reason=f"Removed by Tillu via {author.name}")
+            return True, f"✅ `{role.name}` role {target.mention} se hata diya!"
+        except Exception as e:
+            return True, f"⚠️ Remove error: {e}"
+
+    elif ai_action == "create_channel":
+        ch_name = ai_result.get("channel_name", "").strip().lower().replace(" ", "-")
+        ch_type = ai_result.get("type", "text")
+        try:
+            if ch_type == "voice":
+                new_ch = await guild.create_voice_channel(name=ch_name, reason=f"Created by Tillu via {author.name}")
+            else:
+                new_ch = await guild.create_text_channel(name=ch_name, reason=f"Created by Tillu via {author.name}")
+            return True, f"📁 **Channel Created!** {new_ch.mention} ready hai!"
+        except Exception as e:
+            return True, f"⚠️ Channel create error: {e}"
+
+    elif ai_action == "delete_channel":
+        ch_name = ai_result.get("channel_name", "").strip()
+        target_ch = discord.utils.find(lambda c: ch_name.lower() in c.name.lower(), guild.channels)
+        if not target_ch:
+            return True, f"❌ Channel `{ch_name}` nahi mila!"
+        try:
+            old = target_ch.name
+            await target_ch.delete(reason=f"Deleted by Tillu via {author.name}")
+            return True, f"🗑️ Channel `#{old}` delete kar diya!"
+        except Exception as e:
+            return True, f"⚠️ Delete error: {e}"
+
+    elif ai_action == "lock_channel":
+        ch_name = ai_result.get("channel_name", "")
+        target_ch = message.channel
+        if ch_name and ch_name not in ["current", "this"]:
+            found = discord.utils.find(lambda c: ch_name.lower() in c.name.lower(), guild.channels)
+            if found:
+                target_ch = found
+        try:
+            await target_ch.set_permissions(guild.default_role, send_messages=False, reason=f"Locked by Tillu via {author.name}")
+            return True, f"🔒 **Locked!** {target_ch.mention} lock kar diya!"
+        except Exception as e:
+            return True, f"⚠️ Lock error: {e}"
+
+    elif ai_action == "unlock_channel":
+        ch_name = ai_result.get("channel_name", "")
+        target_ch = message.channel
+        if ch_name and ch_name not in ["current", "this"]:
+            found = discord.utils.find(lambda c: ch_name.lower() in c.name.lower(), guild.channels)
+            if found:
+                target_ch = found
+        try:
+            await target_ch.set_permissions(guild.default_role, send_messages=True, reason=f"Unlocked by Tillu via {author.name}")
+            return True, f"🔓 **Unlocked!** {target_ch.mention} open kar diya!"
+        except Exception as e:
+            return True, f"⚠️ Unlock error: {e}"
+
+    elif ai_action == "restrict_posting":
+        ch_name = ai_result.get("channel_name", "")
+        allowed = [r.lower() for r in ai_result.get("allowed_roles", ["moderator", "admin"])]
+        target_ch = message.channel
+        if ch_name and ch_name not in ["current", "this", ""]:
+            found = discord.utils.find(lambda c: ch_name.lower().replace(" ", "-").replace(" ", "_") in c.name.lower(), guild.channels)
+            if found:
+                target_ch = found
+        try:
+            await target_ch.set_permissions(guild.default_role, send_messages=False, reason=f"Restricted by Tillu via {author.name}")
+            granted = []
+            for role in guild.roles:
+                if any(kw in role.name.lower() for kw in allowed + ["owner", "staff"]):
+                    await target_ch.set_permissions(role, send_messages=True, reason=f"Granted by Tillu via {author.name}")
+                    granted.append(role.name)
+            return True, f"🔐 **Done!** {target_ch.mention} ab sirf **{', '.join(granted) or 'privileged roles'}** post kar sakte hain!"
+        except Exception as e:
+            return True, f"⚠️ Restrict error: {e}"
+
+    elif ai_action == "rename_channel":
+        ch_name = ai_result.get("channel_name", "")
+        new_name = ai_result.get("new_name", "").strip().lower().replace(" ", "-")
+        target_ch = message.channel
+        if ch_name and ch_name not in ["current", "this"]:
+            found = discord.utils.find(lambda c: ch_name.lower() in c.name.lower(), guild.channels)
+            if found:
+                target_ch = found
+        try:
+            old = target_ch.name
+            await target_ch.edit(name=new_name, reason=f"Renamed by Tillu via {author.name}")
+            return True, f"✏️ Channel `#{old}` → `#{new_name}` rename kar diya!"
+        except Exception as e:
+            return True, f"⚠️ Rename error: {e}"
+
+    elif ai_action == "timeout":
+        member_q = ai_result.get("member", "")
+        mins = int(ai_result.get("minutes", 10))
+        target = find_member_fuzzy(member_q)
+        if not target:
+            return True, f"❌ Member `{member_q}` nahi mila!"
+        try:
+            until = discord.utils.utcnow() + datetime.timedelta(minutes=mins)
+            await target.timeout(until, reason=f"Muted by Tillu via {author.name}")
+            return True, f"🤫 {target.mention} ko {mins} min ke liye timeout kar diya!"
+        except Exception as e:
+            return True, f"⚠️ Timeout error: {e}"
+
+    # ai_action == "none" → fall through to regex patterns below
+    # ─────────────────────────────────────────────────────────────────────────
+
+    # 1. PURGE / DELETE MESSAGES (regex fallback)
     # e.g., "tillu delete 10 messages", "tillu purge 20 messages", "delete last 5 chats"
     purge_match = re.search(r'(?:delete|purge|remove|saaf\s+kar\s+do)\s+(?:last\s+)?(\d{1,3})\s+(?:messages?|chats?|msg)', clean_text)
     if purge_match:
