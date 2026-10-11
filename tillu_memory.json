@@ -1,6 +1,6 @@
 {
-  "updated_at": "2026-10-11T04:53:03Z",
-  "count": 8,
+  "updated_at": "2026-10-11T08:23:02Z",
+  "count": 9,
   "memories": {
     "server_owner_is_avinash_aalu": {
       "topic": "server_owner_is_avinash_aalu",
@@ -49,6 +49,12 @@
       "content": "gamerggp ne memory delete karne ko bola hai.",
       "updated_by": "gamerggp (Staff)",
       "updated_at": "2026-10-11 04:53:03 UTC"
+    },
+    "staff_roles_update": {
+      "topic": "staff_roles_update",
+      "content": "gamerggp is Admin, uniqueumar114 is Moderator, there is no co-owner, Avinash is sole Owner.",
+      "updated_by": "gamerggp (Staff)",
+      "updated_at": "2026-10-11 08:23:02 UTC"
     }
   }
 }
