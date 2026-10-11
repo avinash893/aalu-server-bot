@@ -1,0 +1,22 @@
+{
+  "updated_at": "2026-10-11T14:23:12Z",
+  "count": 1,
+  "rules": {
+    "rule_1791728591": {
+      "title": "Spam Anti-Timeoout",
+      "type": "user_restriction",
+      "condition": {
+        "user_id": "current_user",
+        "repeat_message_limit": 3
+      },
+      "action": {
+        "type": "mute",
+        "duration_minutes": 0.25,
+        "warning_message": "You have been timed out for spamming."
+      },
+      "id": "rule_1791728591",
+      "author": "avinashshah",
+      "created_at": "2026-10-11 14:23:11 UTC"
+    }
+  }
+}
