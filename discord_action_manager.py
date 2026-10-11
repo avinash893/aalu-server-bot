@@ -43,6 +43,92 @@ Rules:
 - If action is not Discord-related → {"action": "none"}
 """
 
+import random
+import threading
+
+_nv_raw = os.environ.get("NVIDIA_API_KEYS", "")
+_nv_single = os.environ.get("NVIDIA_API_KEY", "")
+_NVIDIA_KEYS = [k.strip() for k in _nv_raw.split(",") if k.strip()] or ([_nv_single] if _nv_single else [])
+
+class _ActionNvidiaRoller:
+    """Rolls NVIDIA keys after 5-10 successful uses or on 429."""
+    def __init__(self, keys: list[str]):
+        self.keys = keys
+        self.current_idx = 0
+        self.usage_count = 0
+        self.roll_threshold = random.randint(5, 10)
+        self.lock = threading.Lock()
+
+    def get_key(self) -> str:
+        with self.lock:
+            if not self.keys:
+                return ""
+            return self.keys[self.current_idx % len(self.keys)]
+
+    def record_success(self):
+        with self.lock:
+            self.usage_count += 1
+            if self.usage_count >= self.roll_threshold:
+                self.roll()
+
+    def roll(self):
+        with self.lock:
+            if self.keys:
+                self.current_idx = (self.current_idx + 1) % len(self.keys)
+                self.usage_count = 0
+                self.roll_threshold = random.randint(5, 10)
+
+_nv_roller = _ActionNvidiaRoller(_NVIDIA_KEYS)
+
+def _nvidia_classify_action(text: str) -> dict:
+    """Use NVIDIA NIM to classify the Discord action intent as primary AI option."""
+    if not _NVIDIA_KEYS:
+        return {}
+    models = ["openai/gpt-oss-20b", "nvidia/nemotron-3.5-lightning-30b-a3b", "z-ai/glm-5.3-flash"]
+    num_keys = len(_NVIDIA_KEYS)
+    for _ in range(num_keys):
+        key = _nv_roller.get_key()
+        if not key:
+            break
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        for model in models:
+            try:
+                r = _requests.post(
+                    "https://integrate.api.nvidia.com/v1/chat/completions",
+                    headers=headers,
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": _GROQ_SYSTEM},
+                            {"role": "user", "content": text}
+                        ],
+                        "max_tokens": 250,
+                        "temperature": 0
+                    },
+                    timeout=5
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        msg = choices[0].get("message", {})
+                        content = msg.get("content") or msg.get("reasoning_content") or ""
+                        match = re.search(r'\{[\s\S]*?\}', content)
+                        if match:
+                            parsed = json.loads(match.group(0))
+                            if parsed.get("action") and parsed.get("action") != "none":
+                                _nv_roller.record_success()
+                                logger.info(f"[DiscordActionNVIDIA] Classified: {parsed}")
+                                return parsed
+                elif r.status_code == 429:
+                    _nv_roller.roll()
+                    break
+            except Exception as ex:
+                logger.debug(f"[DiscordActionNVIDIA] {model} err: {ex}")
+                continue
+        _nv_roller.roll()
+    return {}
+
 def _groq_classify_action(text: str) -> dict:
     """Use Groq to classify the Discord action intent as fallback. Returns dict or {}."""
     try:
@@ -499,10 +585,12 @@ async def parse_and_execute_discord_action(
                 return True, f"⚠️ Timeout error: {e}"
 
     # ═════════════════════════════════════════════════════════════════════════
-    # ── STEP 2: AI FALLBACK (Only for complex or non-regex phrasing) ─────────
+    # ── STEP 2: AI ACTION CLASSIFICATION (NVIDIA AI Primary -> Groq Fallback) ─
     # ═════════════════════════════════════════════════════════════════════════
     import asyncio
-    ai_result = await asyncio.to_thread(_groq_classify_action, text)
+    ai_result = await asyncio.to_thread(_nvidia_classify_action, text)
+    if not ai_result or ai_result.get("action", "none") == "none":
+        ai_result = await asyncio.to_thread(_groq_classify_action, text)
     ai_action = ai_result.get("action", "none")
 
     if ai_action == "purge":

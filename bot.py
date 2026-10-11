@@ -86,6 +86,57 @@ memory_mgr = MemoryManager(
     repo=os.environ.get("GITHUB_REPO", "avinash893/aalu-server-bot")
 )
 
+# ── NVIDIA AI CONFIGURATION (PRIMARY ENGINE WITH 5-10 CALL KEY ROLLING) ──────
+import random
+import threading
+
+NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY", "")
+raw_nvidia_keys = os.environ.get("NVIDIA_API_KEYS", "")
+NVIDIA_API_KEYS = [k.strip() for k in raw_nvidia_keys.split(",") if k.strip()]
+if not NVIDIA_API_KEYS and NVIDIA_API_KEY:
+    NVIDIA_API_KEYS = [NVIDIA_API_KEY]
+
+NVIDIA_MODELS = [
+    "openai/gpt-oss-20b",
+    "nvidia/nemotron-3.5-lightning-30b-a3b",
+    "z-ai/glm-5.3-flash"
+]
+
+class NvidiaKeyRoller:
+    """Manages NVIDIA API keys and automatically rolls after 5-10 requests or on rate limit."""
+    def __init__(self, keys: list[str]):
+        self.keys = keys
+        self.current_idx = 0
+        self.usage_count = 0
+        self.roll_threshold = random.randint(5, 10)
+        self.lock = threading.Lock()
+
+    def get_current_key(self) -> str:
+        with self.lock:
+            if not self.keys:
+                return ""
+            return self.keys[self.current_idx % len(self.keys)]
+
+    def record_success(self):
+        with self.lock:
+            self.usage_count += 1
+            if self.usage_count >= self.roll_threshold:
+                self._roll()
+
+    def roll_on_error(self):
+        with self.lock:
+            self._roll()
+
+    def _roll(self):
+        if self.keys:
+            old = self.current_idx
+            self.current_idx = (self.current_idx + 1) % len(self.keys)
+            self.usage_count = 0
+            self.roll_threshold = random.randint(5, 10)
+            logging.info(f"[NvidiaKeyRoller] Rotated key {old} -> {self.current_idx} (next roll in {self.roll_threshold} uses)")
+
+nvidia_key_roller = NvidiaKeyRoller(NVIDIA_API_KEYS)
+
 # ── GROQ AI CONFIGURATION (FAST RULE COMPILER & FALLBACK ENGINE) ───────────
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 raw_groq_keys = os.environ.get("GROQ_API_KEYS", "")
@@ -564,6 +615,64 @@ ROLES & ACTIONS:
 """
 
 
+def query_nvidia(prompt: str, system_instruction: str = None, max_tokens: int = 600) -> Optional[str]:
+    """Query NVIDIA NIM API as the primary engine with automatic key rolling (after 5-10 uses or 429)."""
+    if not NVIDIA_API_KEYS:
+        return None
+
+    messages = []
+    if system_instruction:
+        messages.append({"role": "system", "content": system_instruction})
+    messages.append({"role": "user", "content": prompt})
+
+    num_keys = len(NVIDIA_API_KEYS)
+    for _ in range(num_keys):
+        key = nvidia_key_roller.get_current_key()
+        if not key:
+            break
+        headers = {
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "User-Agent": "TilluBot/1.0"
+        }
+        for model in NVIDIA_MODELS:
+            payload = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": max(max_tokens, 300)
+            }
+            try:
+                r = requests.post(
+                    "https://integrate.api.nvidia.com/v1/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=8
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        msg = choices[0].get("message", {})
+                        content = msg.get("content") or ""
+                        if not content and msg.get("reasoning_content"):
+                            content = msg.get("reasoning_content")
+                        if content and content.strip():
+                            nvidia_key_roller.record_success()
+                            return content.strip()
+                elif r.status_code == 429:
+                    logging.warning(f"[NVIDIA AI] {model} rate limited, rolling key...")
+                    nvidia_key_roller.roll_on_error()
+                    break
+                else:
+                    logging.warning(f"[NVIDIA AI] {model} HTTP {r.status_code}: {r.text[:120]}")
+            except Exception as e:
+                logging.warning(f"[NVIDIA AI] {model} request failed: {e}")
+                continue
+        nvidia_key_roller.roll_on_error()
+
+    return None
+
+
 def query_groq(prompt: str, system_instruction: str = None, max_tokens: int = 600) -> Optional[str]:
     """Query Groq API with automatic key rotation and model fallback."""
     keys = GROQ_API_KEYS if GROQ_API_KEYS else ([GROQ_API_KEY] if GROQ_API_KEY else [])
@@ -635,7 +744,22 @@ def process_update_channel_input(instruction: str) -> Dict[str, Any]:
         '}'
     )
 
-    # 1. Try Groq first
+    # 1. Try NVIDIA AI first (primary engine for tasks with 5-10 key rolling)
+    nv_out = query_nvidia(instruction, system_instruction=sys_prompt, max_tokens=400)
+    if nv_out:
+        try:
+            clean = re.sub(r'^```json\s*', '', nv_out.strip(), flags=re.IGNORECASE)
+            clean = re.sub(r'^```\s*', '', clean)
+            clean = re.sub(r'```$', '', clean).strip()
+            match = re.search(r'\{[\s\S]*?\}', clean)
+            if match:
+                data = json.loads(match.group(0))
+                if isinstance(data, dict) and "intent" in data:
+                    return data
+        except Exception as e:
+            logging.warning(f"NVIDIA intent parse error: {e}")
+
+    # 2. Try Groq fallback
     groq_out = query_groq(instruction, system_instruction=sys_prompt, max_tokens=400)
     if groq_out:
         try:
@@ -745,7 +869,19 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
         f"Tillu's Response:"
     )
 
-    # ── PRIMARY FAST ENGINE: GROQ AI (Ultra-fast ~0.5s response via 4 keys + Qwen 3.8 27B) ──
+    # ── 1. PRIMARY ENGINE: NVIDIA AI (Primary option with automatic 5-10 call key rolling) ──
+    try:
+        nvidia_resp = query_nvidia(prompt, system_instruction=final_prompt, max_tokens=600)
+        if nvidia_resp:
+            if user_id:
+                record_user_context(user_id, "user", prompt)
+                clean_text = re.sub(r'(ADMIN_INTENT|WHITELIST_INTENT|START_INTENT):[^\n\r]+', '', nvidia_resp).strip()
+                record_user_context(user_id, "model", clean_text or nvidia_resp)
+            return nvidia_resp
+    except Exception as ne:
+        logging.warning(f"NVIDIA primary engine error, falling back to Groq: {ne}")
+
+    # ── 2. SECONDARY ENGINE: GROQ AI (Fast fallback via 4 keys) ──
     try:
         groq_resp = query_groq(prompt, system_instruction=final_prompt, max_tokens=600)
         if groq_resp:
@@ -755,9 +891,9 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
                 record_user_context(user_id, "model", clean_text or groq_resp)
             return groq_resp
     except Exception as ge:
-        logging.warning(f"Groq primary engine error, falling back to Gemini: {ge}")
+        logging.warning(f"Groq secondary engine error, falling back to Gemini: {ge}")
 
-    # ── SECONDARY ENGINE: GEMINI AI FALLBACK ──
+    # ── 3. TERTIARY ENGINE: GEMINI AI FALLBACK ──
     last_err = "No Gemini response"
     for key in keys:
         for model_name in GEMINI_MODELS:
