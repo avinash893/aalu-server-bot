@@ -108,6 +108,15 @@ rule_mgr = RuleManager(
     repo=os.environ.get("GITHUB_REPO", "avinash893/aalu-server-bot")
 )
 
+# ── DYNAMIC PROMPT & DISCORD ACTION ENGINES ─────────────────────────────────
+from prompt_manager import PromptManager
+from discord_action_manager import parse_and_execute_discord_action
+
+prompt_mgr = PromptManager(
+    token=os.environ.get("GITHUB_TOKEN", ""),
+    repo=os.environ.get("GITHUB_REPO", "avinash893/aalu-server-bot")
+)
+
 # ── USER CONTEXT WINDOW (Rolling 10 Chats per User) ──────────────────────────
 
 MAX_USER_HISTORY = 10
@@ -598,12 +607,13 @@ def query_groq(prompt: str, system_instruction: str = None, max_tokens: int = 60
     return None
 
 def process_update_channel_input(instruction: str) -> Dict[str, Any]:
-    """Process message in #update-tillu: classifies intent as 'chat' or 'rule' using Groq (fallback to Gemini)."""
+    """Process message in #update-tillu: classifies intent as 'chat', 'rule', or 'prompt_update' using Groq (fallback to Gemini)."""
     sys_prompt = (
         "You are Tillu's Autonomous AI Engine in the private #update-tillu channel (powered by Groq).\n"
         "Analyze the admin message and determine INTENT:\n"
         "1. 'chat': The user is chatting, asking questions, testing capabilities, or greeting (e.g. 'can you update yourself?', 'test', 'are you online?', 'how do you work?').\n"
-        "2. 'rule': The user is giving an actionable instruction to moderate chat, mute/timeout a user, run a server command, or set a custom trigger (e.g. 'delete messages containing X', 'from now on mute user Y', 'when someone says A run cmd B').\n\n"
+        "2. 'rule': The user is giving an actionable instruction to moderate chat, mute/timeout a user, run a server command, or set a custom trigger (e.g. 'delete messages containing X', 'from now on mute user Y', 'when someone says A run cmd B').\n"
+        "3. 'prompt_update': The user is telling you to update your personality, tone, behavior, guidelines, or system prompt (e.g. 'from now on act like X', 'update your personality to be Y', 'add this rule to your behavior: Z', 'change your tone to W').\n\n"
         "Output STRICT RAW JSON ONLY (no markdown backticks, no comments):\n"
         "If intent is 'chat':\n"
         '{"intent": "chat", "reply": "Your conversational, direct, and witty response in Hinglish/English as Tillu explaining your capabilities or answering."}\n\n'
@@ -614,6 +624,12 @@ def process_update_channel_input(instruction: str) -> Dict[str, Any]:
         '  "type": "chat_moderation" | "user_restriction" | "server_action" | "custom_response",\n'
         '  "condition": {"keywords": ["..."], "phrase": "...", "user_id": "..."},\n'
         '  "action": {"type": "delete_message" | "mute" | "console" | "reply", "command": "...", "duration_minutes": 10, "warning_message": "...", "reply_message": "..."}\n'
+        '}\n\n'
+        "If intent is 'prompt_update':\n"
+        '{\n'
+        '  "intent": "prompt_update",\n'
+        '  "instruction": "Clean concise instruction describing the new personality or behavioral guideline",\n'
+        '  "tone": "Optional new active tone if requested, else null"\n'
         '}'
     )
 
@@ -655,8 +671,9 @@ def process_update_channel_input(instruction: str) -> Dict[str, Any]:
     # 3. Default fallback: treat as chat response
     return {
         "intent": "chat",
-        "reply": "Arre boss! Tillu Groq AI engine online hai. Aap yahan mujhse baat ya testing kar sakte hain, ya naya rule sikhane ke liye bas boliye (e.g. `from now on delete any message containing XYZ`)."
+        "reply": "Arre boss! Tillu Groq AI engine online hai. Aap yahan mujhse baat ya testing kar sakte hain, personality update kar sakte hain, ya naya rule sikhane ke liye bas boliye (e.g. `from now on delete any message containing XYZ`)."
     }
+
 
 
 def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool = False, is_owner_user: bool = False, target_guild: discord.Guild = None) -> str:
@@ -712,9 +729,11 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
         context_str = "\n[CONVERSATION CONTEXT (LAST 10 CHATS WITH THIS USER)]:\n" + "\n".join(history_lines) + "\n"
 
     memory_context = memory_mgr.get_formatted_context()
+    prompt_ext = prompt_mgr.get_formatted_prompt_extension()
 
     final_prompt = (
         f"{SYSTEM_KNOWLEDGE}\n\n"
+        f"{prompt_ext}\n\n"
         f"{memory_context}\n\n"
         f"{live_telemetry}\n\n"
         f"{bots_summary}"
@@ -2039,7 +2058,34 @@ async def on_message(message: discord.Message):
             embed.set_footer(text="Autonomous Hot-Reload Active • Synced to GitHub (avinash893/aalu-server-bot)")
             await message.channel.send(embed=embed)
             return
+
+        elif intent == "prompt_update":
+            instruction = res.get("instruction", cmd_text)
+            tone = res.get("tone")
+            if tone:
+                prompt_mgr.set_tone(tone, author=message.author.name)
+            if instruction:
+                prompt_mgr.add_instruction(instruction, author=message.author.name)
+
+            embed = discord.Embed(
+                title="🧠 Tillu Personality & System Prompt Updated!",
+                description=f"**New Living Instruction Learned:**\n> *\"{instruction}\"*",
+                color=0x9B59B6,
+                timestamp=discord.utils.utcnow()
+            )
+            if tone:
+                embed.add_field(name="🎭 New Tone", value=f"`{tone}`", inline=False)
+            embed.add_field(name="👤 Updated By", value=message.author.mention, inline=True)
+            embed.set_footer(text="Live Hot-Reload Active • Synced to GitHub (avinash893/aalu-server-bot)")
+            await message.channel.send(embed=embed)
+            return
         return
+
+    # ── AUTONOMOUS DISCORD MANAGEMENT ACTIONS (Roles, Channels, Message Deletions, Timeouts) ──
+    if is_privileged_user(message.author, message.guild):
+        handled, resp = await parse_and_execute_discord_action(message, message.author, message.guild, message.content)
+        if handled:
+            return
 
 
 
