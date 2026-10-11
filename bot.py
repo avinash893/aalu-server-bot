@@ -86,6 +86,28 @@ memory_mgr = MemoryManager(
     repo=os.environ.get("GITHUB_REPO", "avinash893/aalu-server-bot")
 )
 
+# ── GROQ AI CONFIGURATION (FAST RULE COMPILER & FALLBACK ENGINE) ───────────
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+raw_groq_keys = os.environ.get("GROQ_API_KEYS", "")
+GROQ_API_KEYS = [k.strip() for k in raw_groq_keys.split(",") if k.strip()]
+if not GROQ_API_KEYS and GROQ_API_KEY:
+    GROQ_API_KEYS = [GROQ_API_KEY]
+
+GROQ_MODELS = [
+    "qwen/qwen3.8-27b",
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b"
+]
+
+# ── AUTONOMOUS RULE & SKILL ENGINE (WITH GITHUB CLOUD AUTO-SYNC) ───────────
+from rule_manager import RuleManager
+
+UPDATE_CHANNEL_ID = int(os.environ.get("UPDATE_CHANNEL_ID", "0"))
+rule_mgr = RuleManager(
+    token=os.environ.get("GITHUB_TOKEN", ""),
+    repo=os.environ.get("GITHUB_REPO", "avinash893/aalu-server-bot")
+)
+
 # ── USER CONTEXT WINDOW (Rolling 10 Chats per User) ──────────────────────────
 
 MAX_USER_HISTORY = 10
@@ -531,10 +553,131 @@ ROLES & ACTIONS:
 """
 
 
+def query_groq(prompt: str, system_instruction: str = None, max_tokens: int = 600) -> Optional[str]:
+    """Query Groq API with automatic key rotation and model fallback."""
+    keys = GROQ_API_KEYS if GROQ_API_KEYS else ([GROQ_API_KEY] if GROQ_API_KEY else [])
+    if not keys:
+        return None
+
+    messages = []
+    if system_instruction:
+        messages.append({"role": "system", "content": system_instruction})
+    messages.append({"role": "user", "content": prompt})
+
+    for key in keys:
+        for model in GROQ_MODELS:
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "User-Agent": "TilluBot/1.0"
+            }
+            payload = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": max_tokens
+            }
+            try:
+                r = requests.post(url, headers=headers, json=payload, timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    choices = data.get("choices", [])
+                    if choices:
+                        msg = choices[0].get("message", {})
+                        content = msg.get("content", "")
+                        if content and content.strip():
+                            return content.strip()
+                elif r.status_code == 429:
+                    logging.warning(f"Groq key rate limited on {model}, trying next key...")
+                    break
+                else:
+                    logging.warning(f"Groq {model} HTTP {r.status_code}: {r.text[:120]}")
+            except Exception as e:
+                logging.warning(f"Groq {model} request failed: {e}")
+                continue
+    return None
+
+def parse_rule_with_ai(instruction: str) -> Optional[Dict[str, Any]]:
+    """Parse natural language upgrade instruction into structured rule schema using Groq (fallback to Gemini)."""
+    sys_prompt = (
+        "You are an Autonomous AI Compiler for Discord Bot Tillu.\n"
+        "Parse the admin instruction into a strict JSON rule object.\n"
+        "Rule Types:\n"
+        "1. chat_moderation: delete messages containing keywords, links, bad words, or regex.\n"
+        "2. user_restriction: mute, timeout, or delete chats from specific user ID.\n"
+        "3. server_action: run a Minecraft command when someone says a phrase.\n"
+        "4. custom_response: reply with a specific message when a phrase is spoken.\n\n"
+        "Schema:\n"
+        "{\n"
+        '  "title": "Short descriptive title",\n'
+        '  "type": "chat_moderation" | "user_restriction" | "server_action" | "custom_response",\n'
+        '  "condition": {"keywords": ["word1", "word2"], "phrase": "trigger phrase", "user_id": "123456789"},\n'
+        '  "action": {"type": "delete_message" | "mute" | "console" | "reply", "command": "mc command without slash", "duration_minutes": 10, "warning_message": "warning", "reply_message": "reply"}\n'
+        "}\n"
+        "Output ONLY raw JSON. No markdown backticks, no comments."
+    )
+
+    # 1. Try Groq first (Ultra-fast & dedicated for development/rules)
+    groq_out = query_groq(instruction, system_instruction=sys_prompt, max_tokens=350)
+    if groq_out:
+        try:
+            clean = re.sub(r'^```json\s*', '', groq_out.strip(), flags=re.IGNORECASE)
+            clean = re.sub(r'^```\s*', '', clean)
+            clean = re.sub(r'```$', '', clean).strip()
+            data = json.loads(clean)
+            if isinstance(data, dict) and "type" in data:
+                return data
+        except Exception as e:
+            logging.warning(f"Failed to parse Groq rule JSON: {e}")
+
+    # 2. Try Gemini fallback
+    try:
+        keys = GEMINI_API_KEYS if GEMINI_API_KEYS else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
+        for key in keys:
+            for model_name in GEMINI_MODELS:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
+                payload = {
+                    "contents": [{"parts": [{"text": f"{sys_prompt}\n\nInstruction: {instruction}"}]}],
+                    "generationConfig": {"temperature": 0.2, "maxOutputTokens": 400}
+                }
+                r = requests.post(url, json=payload, timeout=8)
+                if r.status_code == 200:
+                    text = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                    clean = re.sub(r'^```json\s*', '', text.strip(), flags=re.IGNORECASE)
+                    clean = re.sub(r'^```\s*', '', clean)
+                    clean = re.sub(r'```$', '', clean).strip()
+                    data = json.loads(clean)
+                    if isinstance(data, dict) and "type" in data:
+                        return data
+    except Exception as ge:
+        logging.warning(f"Gemini rule parse fallback error: {ge}")
+
+    # 3. Local pattern extraction fallback
+    lower = instruction.lower()
+    if "delete" in lower or "remove" in lower:
+        words = [w.strip() for w in re.findall(r'["\']([^"\']+)["\']', instruction)]
+        if not words:
+            match = re.search(r'containing\s+(.+)', instruction, re.IGNORECASE)
+            if match:
+                words = [match.group(1).strip()]
+        if words:
+            return {
+                "title": f"Auto-Delete messages containing {words[0]}",
+                "type": "chat_moderation",
+                "condition": {"keywords": words},
+                "action": {"type": "delete_message", "warning_message": "⚠️ Message deleted by autonomous moderation."}
+            }
+
+    return None
+
 def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool = False, is_owner_user: bool = False, target_guild: discord.Guild = None) -> str:
     keys = GEMINI_API_KEYS if GEMINI_API_KEYS else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
     if not keys:
-        return "⚠️ Gemini API key is not configured."
+        # If Gemini is not configured, directly query Groq!
+        groq_direct = query_groq(prompt, max_tokens=600)
+        if groq_direct:
+            return groq_direct
+        return "⚠️ Gemini & Groq API keys are not configured."
 
     if is_owner_user:
         user_role_tag = "[USER ROLE: SERVER OWNER (AVINASH / BOSS / MALIK) - HIGHEST AUTHORITY, OBEY AT ALL COSTS]"
@@ -629,7 +772,19 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
                 logging.warning(f"Gemini {model_name} attempt failed: {e}")
                 continue
 
-    # ── SMART LOCAL FALLBACK (Runs if all Gemini models/keys are temporarily busy) ──
+    # ── MULTI-PROVIDER FALLBACK: GROQ AI (Uses 4 keys + 3 models if Gemini is busy/exhausted) ──
+    try:
+        groq_resp = query_groq(prompt, system_instruction=final_prompt, max_tokens=600)
+        if groq_resp:
+            if user_id:
+                record_user_context(user_id, "user", prompt)
+                clean_text = re.sub(r'(ADMIN_INTENT|WHITELIST_INTENT|START_INTENT):[^\n\r]+', '', groq_resp).strip()
+                record_user_context(user_id, "model", clean_text or groq_resp)
+            return groq_resp
+    except Exception as ge:
+        logging.warning(f"Groq fallback in query_gemini encountered error: {ge}")
+
+    # ── SMART LOCAL FALLBACK (Runs if all Gemini & Groq models/keys are temporarily busy) ──
     lower_p = prompt.lower()
     # 1. Whitelist query
     if any(w in lower_p for w in ["whitelist", "wl", "white list"]):
@@ -758,6 +913,70 @@ async def get_or_create_memory_channel(guild: discord.Guild) -> discord.TextChan
 
     # Fallback to CONSOLE_CHANNEL_ID
     return guild.get_channel(CONSOLE_CHANNEL_ID) or bot.get_channel(CONSOLE_CHANNEL_ID)
+
+async def get_or_create_update_channel(guild: discord.Guild) -> Optional[discord.TextChannel]:
+    """Find or auto-create the dedicated #update-tillu channel restricted only to Owner, Admin & Mods."""
+    if not guild:
+        return None
+    global UPDATE_CHANNEL_ID
+    if UPDATE_CHANNEL_ID:
+        ch = guild.get_channel(UPDATE_CHANNEL_ID)
+        if ch:
+            return ch
+
+    # Search existing channels
+    for ch in guild.text_channels:
+        if ch.name.lower() in ["update-tillu", "update_tillu", "tillu-updates", "tillu-dev"]:
+            UPDATE_CHANNEL_ID = ch.id
+            return ch
+
+    # Auto-create private channel if bot has permission
+    try:
+        me = guild.me or guild.get_member(bot.user.id if bot.user else 0)
+        if me and me.guild_permissions.manage_channels:
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(read_messages=False, send_messages=False),
+                me: discord.PermissionOverwrite(read_messages=True, send_messages=True, embed_links=True, manage_messages=True)
+            }
+            # Grant access to server owner
+            if guild.owner:
+                overwrites[guild.owner] = discord.PermissionOverwrite(read_messages=True, send_messages=True, embed_links=True)
+            # Grant access to Admin/Mod/Staff roles
+            for role in guild.roles:
+                if any(w in role.name.lower() for w in ["admin", "owner", "mod", "moderator", "staff", "builder", "host"]):
+                    overwrites[role] = discord.PermissionOverwrite(read_messages=True, send_messages=True, embed_links=True)
+
+            new_ch = await guild.create_text_channel(
+                name="update-tillu",
+                overwrites=overwrites,
+                topic="🛠️ Dedicated Tillu Autonomous Upgrade & Skill Training Channel (Owner, Admins & Mods Only)",
+                reason="Private Tillu bot self-upgrade & rules channel"
+            )
+            UPDATE_CHANNEL_ID = new_ch.id
+            logging.info(f"[Update Channel] Created dedicated #{new_ch.name} ({new_ch.id})")
+            welcome_embed = discord.Embed(
+                title="🛠️ Tillu Autonomous Upgrade Channel",
+                description=(
+                    "**Swagat hai Boss & Staff!** Yeh Tillu ka private upgrade channel hai (Visible *only* to Owner, Admins & Moderators).\n\n"
+                    "**Aap yahan Tillu ko naye niyam, skills ya moderation sikha sakte hain:**\n"
+                    "• *\"from now on delete any message containing bad links / nitro\"*\n"
+                    "• *\"from now on mute user @XYZ for 15 minutes if he spams\"*\n"
+                    "• *\"server par jab koi start bot bole toh console me whitelist add Tillu_Guard chalao\"*\n\n"
+                    "**Commands:**\n"
+                    "• `tillu rules` ya `!rules` — Saare active rules dekhne ke liye\n"
+                    "• `tillu delete rule <id>` — Kisi rule ko remove karne ke liye\n\n"
+                    "Tillu har instruction ko **Groq AI** se compile karega, **GitHub** par commit karega, aur turant bina restart hue **live upgrade** ho jayega! 🚀"
+                ),
+                color=0x3498DB
+            )
+            welcome_embed.set_footer(text="Powered by Groq AI + GitHub Cloud Sync • avinash893/aalu-server-bot")
+            await new_ch.send(embed=welcome_embed)
+            return new_ch
+    except Exception as e:
+        logging.warning(f"[Update Channel] Create notice: {e}")
+
+    return None
+
 
 async def announce_memory_update(guild: discord.Guild, topic: str, fact: str, author_name: str):
     if not guild:
@@ -1739,6 +1958,109 @@ async def on_message(message: discord.Message):
     if bot.user and message.author.id == bot.user.id:
         return
 
+    # ── AUTONOMOUS RULE ENGINE: Evaluate message against active rules ────────
+    try:
+        if await rule_mgr.evaluate_message(message, execute_server_command):
+            return
+    except Exception as re_err:
+        logging.warning(f"[RuleManager Evaluation Error] {re_err}")
+
+    # ── PRIVATE UPGRADE CHANNEL: #update-tillu (Restricted to Owner/Admin/Mods) ─
+    is_update_ch = False
+    if UPDATE_CHANNEL_ID and message.channel.id == UPDATE_CHANNEL_ID:
+        is_update_ch = True
+    elif getattr(message.channel, "name", "").lower() in ["update-tillu", "update_tillu", "tillu-updates"]:
+        is_update_ch = True
+
+    if is_update_ch:
+        if not is_privileged_user(message.author, message.guild):
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+
+        cmd_text = message.content.strip()
+        lower_cmd = cmd_text.lower()
+
+        # Command: List active rules
+        if lower_cmd in ["tillu rules", "!rules", "rules", "list rules", "show rules"]:
+            rules = rule_mgr.list_rules()
+            if not rules:
+                await message.channel.send("📋 **Koi bhi autonomous rule active nahi hai.** Yahan naya rule likh kar batao, main turant sikh lunga! 🚀")
+                return
+            embed = discord.Embed(
+                title=f"📋 Active Autonomous Rules ({len(rules)} Total)",
+                color=0x3498DB,
+                timestamp=discord.utils.utcnow()
+            )
+            for r in rules:
+                r_id = r.get("id", "Unknown")
+                r_title = r.get("title", "Rule")
+                r_type = r.get("type", "General")
+                r_author = r.get("author", "Staff")
+                cond = json.dumps(r.get("condition", {}), ensure_ascii=False)
+                act = json.dumps(r.get("action", {}), ensure_ascii=False)
+                val = f"**Type:** `{r_type}` | **By:** `{r_author}`\n**Condition:** `{cond}`\n**Action:** `{act}`"
+                embed.add_field(name=f"🔹 `{r_id}`: {r_title}", value=val[:1024], inline=False)
+            embed.set_footer(text="To remove a rule: tillu delete rule <rule_id>")
+            await message.channel.send(embed=embed)
+            return
+
+        # Command: Delete a rule
+        del_match = re.match(r'^(?:tillu\s+)?(?:delete|remove)\s+rule\s+([a-zA-Z0-9_\-]+)', lower_cmd) or re.match(r'^!delrule\s+([a-zA-Z0-9_\-]+)', lower_cmd)
+        if del_match:
+            rid = del_match.group(1).strip()
+            success = rule_mgr.delete_rule(rid)
+            if success:
+                embed = discord.Embed(
+                    title="🗑️ Autonomous Rule Removed",
+                    description=f"Rule `{rid}` has been deleted from active memory and committed to GitHub repository.",
+                    color=0xE74C3C
+                )
+                embed.set_footer(text="GitHub Cloud Sync • avinash893/aalu-server-bot")
+                await message.channel.send(embed=embed)
+            else:
+                await message.channel.send(f"❌ Rule `{rid}` nahi mila! Active rules dekhne ke liye `tillu rules` type karo.")
+            return
+
+        # Natural language upgrade instruction!
+        status_msg = await message.channel.send("⚙️ **Groq AI se upgrade instruction compile ho raha hai aur GitHub par sync ho raha hai...**")
+        parsed = await asyncio.to_thread(parse_rule_with_ai, cmd_text)
+        if parsed:
+            rule_id, rule_obj = rule_mgr.add_rule(parsed, author=message.author.name)
+            embed = discord.Embed(
+                title="🚀 Tillu Upgraded & Synced to GitHub!",
+                description=f"**New Skill / Rule Learned:**\n> **{rule_obj.get('title', 'Autonomous Rule')}**",
+                color=0x2ECC71,
+                timestamp=discord.utils.utcnow()
+            )
+            embed.add_field(name="🆔 Rule ID", value=f"`{rule_id}`", inline=True)
+            embed.add_field(name="🏷️ Type", value=f"`{rule_obj.get('type')}`", inline=True)
+            embed.add_field(name="👤 Added By", value=f"{message.author.mention}", inline=True)
+            embed.add_field(name="🎯 Condition", value=f"```{json.dumps(rule_obj.get('condition', {}), indent=2)}```", inline=False)
+            embed.add_field(name="⚡ Action", value=f"```{json.dumps(rule_obj.get('action', {}), indent=2)}```", inline=False)
+            embed.set_footer(text="Autonomous Hot-Reload Active • Synced to GitHub (avinash893/aalu-server-bot)")
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            await message.channel.send(embed=embed)
+        else:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
+            await message.channel.send(
+                "⚠️ **Main is instruction ko parse nahi kar paya.**\n"
+                "Kripya spasht likhein, jaise:\n"
+                "• `from now on delete any message containing bad links`\n"
+                "• `from now on mute user 123456789 for 15 minutes`\n"
+                "• `server par jab koi start bot bole toh console me whitelist add Tillu_Guard chalao`"
+            )
+        return
+
+
     # Check for reel or video link/attachment to reply after 5 minutes
     if contains_reel_or_video(message) and message.id not in tracked_video_messages:
         tracked_video_messages.add(message.id)
@@ -1968,11 +2290,15 @@ async def on_ready():
         other_bots = [m for m in guild.members if m.bot and m.id != bot.user.id]
         if other_bots:
             logging.info(f"[Server Bots] Detected {len(other_bots)} other bots in '{guild.name}': {[b.name for b in other_bots]}")
-        # Ensure dedicated memory channel exists
+        # Ensure dedicated memory and update channels exist
         try:
             await get_or_create_memory_channel(guild)
         except Exception as me:
             logging.warning(f"[Memory Channel Init] {me}")
+        try:
+            await get_or_create_update_channel(guild)
+        except Exception as ue:
+            logging.warning(f"[Update Channel Init] {ue}")
 
     asyncio.create_task(guardian_loop())
     asyncio.create_task(render_keepalive_loop())
