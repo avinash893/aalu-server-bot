@@ -529,10 +529,12 @@ ROLES & ACTIONS:
   FIRST LINE: START_INTENT: start
   Followed by: "Bhai server start karne ke liye HexaCraft panel pe jao aur **Start** daba do: https://panel.hexacraft.fun/server/14c2ebb6 🚀 (Har 10 minute me server auto-start bhi hota hai!)"
 
-- SERVER OWNER & ADMIN COMMANDS:
-  When an Admin or Owner tells you to ban, unban, kick, remove from whitelist, op, or run console command:
+- SERVER OWNER & ADMIN COMMANDS (MINECRAFT ONLY):
+  When an Admin or Owner tells you to ban, unban, kick, remove from whitelist, op, or run console command on the MINECRAFT game server:
   FIRST LINE: ADMIN_INTENT: <exact_minecraft_console_command>
   Followed by: "Done boss! Command console me bhej diya! 🔥"
+  CRITICAL: NEVER output ADMIN_INTENT for Discord server actions (like deleting Discord messages, deleting Discord roles, managing channels). Discord actions are handled directly by Discord tools, NOT console.
+
 
 - REGULAR MEMBER WHITELIST:
   When a normal member asks to whitelist (e.g. "whitelist me <IGN>", "my IGN is <IGN>"):
@@ -1395,11 +1397,20 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
         match = re.search(r'ADMIN_INTENT:\s*([^\n\r]+)', answer)
         if match:
             cmd = match.group(1).strip()
+            # GUARD: Never send Discord management actions to Minecraft server console!
+            if any(w in cmd.lower() for w in ["purge", "unassignrole", "role", "channel", "/discord", "clear", "delete message"]):
+                logging.info(f"[AdminIntent Guard] Blocked misrouted Discord action from console: {cmd}")
+                clean_reply = answer.replace(match.group(0), "").strip()
+                if clean_reply:
+                    await reply_fn(content=clean_reply)
+                return
+
             if not is_admin:
                 await reply_fn(content="🚫 Arre bhai, sirf Server Owner, Admins aur Moderators ke paas console ya ban/kick commands chalane ki permission hai!")
                 return
 
             ok, resp_str = await execute_server_command(cmd)
+
             # If removing from whitelist, also clean local registry
             if "whitelist remove" in cmd.lower():
                 target_p = cmd.split()[-1]

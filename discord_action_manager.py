@@ -52,8 +52,12 @@ def _groq_classify_action(text: str) -> dict:
         keys = [k.strip() for k in raw_keys.split(",") if k.strip()] or ([single] if single else [])
         if not keys:
             return {}
-        models = ["llama-3.1-8b-instant", "llama3-8b-8192"]
-        for key in keys[:2]:
+        models = [
+            "qwen/qwen3.8-27b",
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b"
+        ]
+        for key in keys:
             for model in models:
                 try:
                     r = _requests.post(
@@ -72,11 +76,17 @@ def _groq_classify_action(text: str) -> dict:
                     )
                     if r.status_code == 200:
                         content = r.json()["choices"][0]["message"]["content"].strip()
-                        # Extract JSON
-                        match = re.search(r'\{.*\}', content, re.DOTALL)
+                        # Extract JSON (handles markdown codeblocks like ```json { ... } ```)
+                        match = re.search(r'\{[\s\S]*?\}', content)
                         if match:
-                            return json.loads(match.group(0))
-                except Exception:
+                            parsed = json.loads(match.group(0))
+                            if parsed.get("action") and parsed.get("action") != "none":
+                                logger.info(f"[DiscordActionAI] Classified: {parsed}")
+                                return parsed
+                    elif r.status_code == 429:
+                        break  # try next key
+                except Exception as ex:
+                    logger.debug(f"[DiscordActionAI] {model} err: {ex}")
                     continue
     except Exception as e:
         logger.warning(f"[DiscordActionAI] classify error: {e}")
@@ -120,10 +130,18 @@ async def parse_and_execute_discord_action(
     # ── HELPER: Fuzzy role finder ─────────────────────────────────────────────
     def find_role_fuzzy(query: str) -> discord.Role | None:
         q = query.lower().strip()
-        return (
-            discord.utils.find(lambda r: r.name.lower() == q, guild.roles) or
-            discord.utils.find(lambda r: q in r.name.lower(), guild.roles)
-        )
+        q_clean = re.sub(r'^(?:named?\s*[:\-]*\s*|role\s+)', '', q).strip()
+        q_alnum = re.sub(r'[^a-zA-Z0-9]', '', q_clean)
+        # Exact name match
+        for r in guild.roles:
+            if r.name.lower() == q or r.name.lower() == q_clean:
+                return r
+        # Alphanumeric match (handles "Named:- Creators" matching "Creators")
+        for r in guild.roles:
+            r_alnum = re.sub(r'[^a-zA-Z0-9]', '', r.name).lower()
+            if q_alnum and (r_alnum == q_alnum or q_alnum in r_alnum or r_alnum in q_alnum):
+                return r
+        return None
 
     # ── AI-FIRST: Groq classifies action → execute structured result ──────────
     import asyncio
@@ -132,25 +150,35 @@ async def parse_and_execute_discord_action(
 
     if ai_action == "purge":
         count = min(int(ai_result.get("count", 5)), 100)
-        # Optionally target a different channel by name
+        # Optionally target a different channel by name (e.g. "admin", "chat")
         target_ch = message.channel
         ch_name = ai_result.get("channel")
-        if ch_name and ch_name.lower() not in ["null", "none", "current", ""]:
-            found = discord.utils.find(lambda c: ch_name.lower() in c.name.lower(), guild.channels)
-            if found:
+        if ch_name and str(ch_name).lower() not in ["null", "none", "current", "", "this"]:
+            clean_ch_name = re.sub(r'[^a-zA-Z0-9]', '', str(ch_name)).lower()
+            found = discord.utils.find(lambda c: clean_ch_name in re.sub(r'[^a-zA-Z0-9]', '', c.name).lower(), guild.channels)
+            if found and isinstance(found, discord.TextChannel):
                 target_ch = found
         try:
-            deleted = await target_ch.purge(limit=count + 1)
-            actual = max(len(deleted) - 1, 0)
+            bot_only = any(w in text.lower() for w in ["your", "tillu", "apne", "khud ke", "sent by you"])
+            deleted = []
+            if bot_only:
+                my_id = guild.me.id if guild.me else message.author.id
+                def is_bot_msg(m):
+                    return m.author.id == my_id
+                deleted = await target_ch.purge(limit=min(count * 5, 100), check=is_bot_msg)
+            else:
+                deleted = await target_ch.purge(limit=count + 1)
+            actual = len(deleted)
             conf = f"🧹 **Done Boss!** `{actual}` messages delete kar diye {target_ch.mention} se!"
-            sent = await target_ch.send(conf)
+            sent = await message.channel.send(conf)
             try:
-                await sent.delete(delay=5)
+                await sent.delete(delay=6)
             except Exception:
                 pass
             return True, None  # already sent
         except Exception as e:
             return True, f"⚠️ Purge error: {e}"
+
 
     elif ai_action in ("create_role", "create_and_assign_role"):
         role_name = ai_result.get("role_name", "").strip().title()
@@ -321,25 +349,51 @@ async def parse_and_execute_discord_action(
     # ─────────────────────────────────────────────────────────────────────────
 
     # 1. PURGE / DELETE MESSAGES (regex fallback)
-    # e.g., "tillu delete 10 messages", "tillu purge 20 messages", "delete last 5 chats"
-    purge_match = re.search(r'(?:delete|purge|remove|saaf\s+kar\s+do)\s+(?:last\s+)?(\d{1,3})\s+(?:messages?|chats?|msg)', clean_text)
+    # e.g., "tillu delete 10 messages", "delete 4 of your recent messages in admin"
+    purge_match = re.search(r'(?:delete|purge|remove|saaf\s+kar\s+do|hata\s+do)\s+(?:(?:last|recent|of\s+your\s+recent|your)\s+)?(\d{1,3})\s+(?:(?:of\s+(?:your\s+)?(?:recent\s+)?)?(?:messages?|chats?|msg))', clean_text)
     if purge_match:
         count = min(int(purge_match.group(1)), 100)
+        target_ch = message.channel
+        # Check if another channel mentioned by name
+        for ch in guild.channels:
+            if isinstance(ch, discord.TextChannel) and ch.name.lower() in clean_text and ch != message.channel:
+                target_ch = ch
+                break
         try:
-            # Delete trigger message + target count
-            deleted = await message.channel.purge(limit=count + 1)
-            actual = max(len(deleted) - 1, 0)
-            conf = f"🧹 **Done Boss!** Maine is channel ke aakhri `{actual}` messages delete kar diye!"
+            bot_only = any(w in clean_text for w in ["your", "tillu", "apne", "khud ke"])
+            if bot_only:
+                my_id = guild.me.id if guild.me else message.author.id
+                deleted = await target_ch.purge(limit=min(count * 5, 100), check=lambda m: m.author.id == my_id)
+            else:
+                deleted = await target_ch.purge(limit=count + 1)
+            actual = len(deleted)
+            conf = f"🧹 **Done Boss!** `{actual}` messages delete kar diye {target_ch.mention} se!"
             sent = await message.channel.send(conf)
             try:
-                await sent.delete(delay=5)
+                await sent.delete(delay=6)
             except Exception:
                 pass
-            return True, conf
+            return True, None
         except Exception as e:
             err = f"⚠️ Messages delete karne me error aaya: {e}"
             await message.channel.send(err)
             return True, err
+
+    # 1b. DELETE / REMOVE ROLE FROM SERVER (regex fallback)
+    # e.g., "remove the role Named:- Creators from discord", "delete role Creators"
+    del_role_match = re.search(r'(?:delete|remove|hata\s+do)\s+(?:the\s+)?role\s+(?:named?\s*[:\-]*\s*|called?\s*[:\-]*\s*)?["\']?([^"\']+)["\']?(?:\s+from\s+(?:discord|server))?', clean_text)
+    if del_role_match and not re.search(r'\bfrom\s+(?:<@|\b[a-zA-Z0-9_]{3,}\b)', clean_text):
+        role_q = del_role_match.group(1).strip()
+        role = find_role_fuzzy(role_q)
+        if role:
+            try:
+                r_name = role.name
+                await role.delete(reason=f"Deleted by Tillu via {author.name}")
+                return True, f"🗑️ **Role Deleted!** `{r_name}` role server se delete kar diya gaya hai!"
+            except Exception as e:
+                return True, f"⚠️ Role delete error: {e}"
+        else:
+            return True, f"❌ Role `{role_q}` nahi mila!"
 
     # 1a. CREATE ROLE (without assigning)
     # e.g., "create role Creators", "tillu create a role named VIP", "make role Creators"
