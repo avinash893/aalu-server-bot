@@ -597,38 +597,38 @@ def query_groq(prompt: str, system_instruction: str = None, max_tokens: int = 60
                 continue
     return None
 
-def parse_rule_with_ai(instruction: str) -> Optional[Dict[str, Any]]:
-    """Parse natural language upgrade instruction into structured rule schema using Groq (fallback to Gemini)."""
+def process_update_channel_input(instruction: str) -> Dict[str, Any]:
+    """Process message in #update-tillu: classifies intent as 'chat' or 'rule' using Groq (fallback to Gemini)."""
     sys_prompt = (
-        "You are an Autonomous AI Compiler for Discord Bot Tillu.\n"
-        "Parse the admin instruction into a strict JSON rule object.\n"
-        "Rule Types:\n"
-        "1. chat_moderation: delete messages containing keywords, links, bad words, or regex.\n"
-        "2. user_restriction: mute, timeout, or delete chats from specific user ID.\n"
-        "3. server_action: run a Minecraft command when someone says a phrase.\n"
-        "4. custom_response: reply with a specific message when a phrase is spoken.\n\n"
-        "Schema:\n"
-        "{\n"
+        "You are Tillu's Autonomous AI Engine in the private #update-tillu channel (powered by Groq).\n"
+        "Analyze the admin message and determine INTENT:\n"
+        "1. 'chat': The user is chatting, asking questions, testing capabilities, or greeting (e.g. 'can you update yourself?', 'test', 'are you online?', 'how do you work?').\n"
+        "2. 'rule': The user is giving an actionable instruction to moderate chat, mute/timeout a user, run a server command, or set a custom trigger (e.g. 'delete messages containing X', 'from now on mute user Y', 'when someone says A run cmd B').\n\n"
+        "Output STRICT RAW JSON ONLY (no markdown backticks, no comments):\n"
+        "If intent is 'chat':\n"
+        '{"intent": "chat", "reply": "Your conversational, direct, and witty response in Hinglish/English as Tillu explaining your capabilities or answering."}\n\n'
+        "If intent is 'rule':\n"
+        '{\n'
+        '  "intent": "rule",\n'
         '  "title": "Short descriptive title",\n'
         '  "type": "chat_moderation" | "user_restriction" | "server_action" | "custom_response",\n'
-        '  "condition": {"keywords": ["word1", "word2"], "phrase": "trigger phrase", "user_id": "123456789"},\n'
-        '  "action": {"type": "delete_message" | "mute" | "console" | "reply", "command": "mc command without slash", "duration_minutes": 10, "warning_message": "warning", "reply_message": "reply"}\n'
-        "}\n"
-        "Output ONLY raw JSON. No markdown backticks, no comments."
+        '  "condition": {"keywords": ["..."], "phrase": "...", "user_id": "..."},\n'
+        '  "action": {"type": "delete_message" | "mute" | "console" | "reply", "command": "...", "duration_minutes": 10, "warning_message": "...", "reply_message": "..."}\n'
+        '}'
     )
 
-    # 1. Try Groq first (Ultra-fast & dedicated for development/rules)
-    groq_out = query_groq(instruction, system_instruction=sys_prompt, max_tokens=350)
+    # 1. Try Groq first
+    groq_out = query_groq(instruction, system_instruction=sys_prompt, max_tokens=400)
     if groq_out:
         try:
             clean = re.sub(r'^```json\s*', '', groq_out.strip(), flags=re.IGNORECASE)
             clean = re.sub(r'^```\s*', '', clean)
             clean = re.sub(r'```$', '', clean).strip()
             data = json.loads(clean)
-            if isinstance(data, dict) and "type" in data:
+            if isinstance(data, dict) and "intent" in data:
                 return data
         except Exception as e:
-            logging.warning(f"Failed to parse Groq rule JSON: {e}")
+            logging.warning(f"Groq intent parse error: {e}")
 
     # 2. Try Gemini fallback
     try:
@@ -637,8 +637,8 @@ def parse_rule_with_ai(instruction: str) -> Optional[Dict[str, Any]]:
             for model_name in GEMINI_MODELS:
                 url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
                 payload = {
-                    "contents": [{"parts": [{"text": f"{sys_prompt}\n\nInstruction: {instruction}"}]}],
-                    "generationConfig": {"temperature": 0.2, "maxOutputTokens": 400}
+                    "contents": [{"parts": [{"text": f"{sys_prompt}\n\nUser Input: {instruction}"}]}],
+                    "generationConfig": {"temperature": 0.2, "maxOutputTokens": 450}
                 }
                 r = requests.post(url, json=payload, timeout=8)
                 if r.status_code == 200:
@@ -647,28 +647,17 @@ def parse_rule_with_ai(instruction: str) -> Optional[Dict[str, Any]]:
                     clean = re.sub(r'^```\s*', '', clean)
                     clean = re.sub(r'```$', '', clean).strip()
                     data = json.loads(clean)
-                    if isinstance(data, dict) and "type" in data:
+                    if isinstance(data, dict) and "intent" in data:
                         return data
     except Exception as ge:
-        logging.warning(f"Gemini rule parse fallback error: {ge}")
+        logging.warning(f"Gemini intent parse fallback error: {ge}")
 
-    # 3. Local pattern extraction fallback
-    lower = instruction.lower()
-    if "delete" in lower or "remove" in lower:
-        words = [w.strip() for w in re.findall(r'["\']([^"\']+)["\']', instruction)]
-        if not words:
-            match = re.search(r'containing\s+(.+)', instruction, re.IGNORECASE)
-            if match:
-                words = [match.group(1).strip()]
-        if words:
-            return {
-                "title": f"Auto-Delete messages containing {words[0]}",
-                "type": "chat_moderation",
-                "condition": {"keywords": words},
-                "action": {"type": "delete_message", "warning_message": "⚠️ Message deleted by autonomous moderation."}
-            }
+    # 3. Default fallback: treat as chat response
+    return {
+        "intent": "chat",
+        "reply": "Arre boss! Tillu Groq AI engine online hai. Aap yahan mujhse baat ya testing kar sakte hain, ya naya rule sikhane ke liye bas boliye (e.g. `from now on delete any message containing XYZ`)."
+    }
 
-    return None
 
 def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool = False, is_owner_user: bool = False, target_guild: discord.Guild = None) -> str:
     keys = GEMINI_API_KEYS if GEMINI_API_KEYS else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
@@ -2024,11 +2013,18 @@ async def on_message(message: discord.Message):
                 await message.channel.send(f"❌ Rule `{rid}` nahi mila! Active rules dekhne ke liye `tillu rules` type karo.")
             return
 
-        # Natural language upgrade instruction!
-        status_msg = await message.channel.send("⚙️ **Groq AI se upgrade instruction compile ho raha hai aur GitHub par sync ho raha hai...**")
-        parsed = await asyncio.to_thread(parse_rule_with_ai, cmd_text)
-        if parsed:
-            rule_id, rule_obj = rule_mgr.add_rule(parsed, author=message.author.name)
+        # Natural language input in #update-tillu:
+        async with message.channel.typing():
+            res = await asyncio.to_thread(process_update_channel_input, cmd_text)
+
+        intent = res.get("intent", "chat")
+        if intent == "chat":
+            reply_text = res.get("reply", "Haan Boss! Tillu Groq AI engine online aur ready hai.")
+            await message.reply(reply_text)
+            return
+
+        elif intent == "rule":
+            rule_id, rule_obj = rule_mgr.add_rule(res, author=message.author.name)
             embed = discord.Embed(
                 title="🚀 Tillu Upgraded & Synced to GitHub!",
                 description=f"**New Skill / Rule Learned:**\n> **{rule_obj.get('title', 'Autonomous Rule')}**",
@@ -2041,24 +2037,10 @@ async def on_message(message: discord.Message):
             embed.add_field(name="🎯 Condition", value=f"```{json.dumps(rule_obj.get('condition', {}), indent=2)}```", inline=False)
             embed.add_field(name="⚡ Action", value=f"```{json.dumps(rule_obj.get('action', {}), indent=2)}```", inline=False)
             embed.set_footer(text="Autonomous Hot-Reload Active • Synced to GitHub (avinash893/aalu-server-bot)")
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
             await message.channel.send(embed=embed)
-        else:
-            try:
-                await status_msg.delete()
-            except Exception:
-                pass
-            await message.channel.send(
-                "⚠️ **Main is instruction ko parse nahi kar paya.**\n"
-                "Kripya spasht likhein, jaise:\n"
-                "• `from now on delete any message containing bad links`\n"
-                "• `from now on mute user 123456789 for 15 minutes`\n"
-                "• `server par jab koi start bot bole toh console me whitelist add Tillu_Guard chalao`"
-            )
+            return
         return
+
 
 
     # Check for reel or video link/attachment to reply after 5 minutes
