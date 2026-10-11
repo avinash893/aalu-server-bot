@@ -745,6 +745,19 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
         f"Tillu's Response:"
     )
 
+    # ── PRIMARY FAST ENGINE: GROQ AI (Ultra-fast ~0.5s response via 4 keys + Qwen 3.8 27B) ──
+    try:
+        groq_resp = query_groq(prompt, system_instruction=final_prompt, max_tokens=600)
+        if groq_resp:
+            if user_id:
+                record_user_context(user_id, "user", prompt)
+                clean_text = re.sub(r'(ADMIN_INTENT|WHITELIST_INTENT|START_INTENT):[^\n\r]+', '', groq_resp).strip()
+                record_user_context(user_id, "model", clean_text or groq_resp)
+            return groq_resp
+    except Exception as ge:
+        logging.warning(f"Groq primary engine error, falling back to Gemini: {ge}")
+
+    # ── SECONDARY ENGINE: GEMINI AI FALLBACK ──
     last_err = "No Gemini response"
     for key in keys:
         for model_name in GEMINI_MODELS:
@@ -763,7 +776,7 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
                 }
             }
             try:
-                r = requests.post(url, json=payload, timeout=8)
+                r = requests.post(url, json=payload, timeout=4)
                 if r.status_code == 200:
                     data = r.json()
                     text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
@@ -776,23 +789,10 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
                         return text
                 else:
                     last_err = f"{model_name} HTTP {r.status_code}: {r.text[:120]}"
-                    logging.warning(f"Gemini {model_name} HTTP {r.status_code}: {r.text[:150]}")
             except Exception as e:
                 last_err = f"{model_name} {type(e).__name__}: {str(e)[:120]}"
-                logging.warning(f"Gemini {model_name} attempt failed: {e}")
                 continue
 
-    # ── MULTI-PROVIDER FALLBACK: GROQ AI (Uses 4 keys + 3 models if Gemini is busy/exhausted) ──
-    try:
-        groq_resp = query_groq(prompt, system_instruction=final_prompt, max_tokens=600)
-        if groq_resp:
-            if user_id:
-                record_user_context(user_id, "user", prompt)
-                clean_text = re.sub(r'(ADMIN_INTENT|WHITELIST_INTENT|START_INTENT):[^\n\r]+', '', groq_resp).strip()
-                record_user_context(user_id, "model", clean_text or groq_resp)
-            return groq_resp
-    except Exception as ge:
-        logging.warning(f"Groq fallback in query_gemini encountered error: {ge}")
 
     # ── SMART LOCAL FALLBACK (Runs if all Gemini & Groq models/keys are temporarily busy) ──
     lower_p = prompt.lower()

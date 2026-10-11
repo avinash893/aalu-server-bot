@@ -107,6 +107,15 @@ async def parse_and_execute_discord_action(
 
     clean_text = text.lower().strip()
 
+    # ── FAST BAILOUT: Skip immediately for normal conversation (0ms overhead) ──
+    MGMT_KEYWORDS = [
+        "role", "channel", "delete", "purge", "remove", "saaf", "hata", "mute", "timeout",
+        "lock", "unlock", "slowmode", "topic", "rename", "category", "clone", "clip", "post in",
+        "permission", "creators", "admin"
+    ]
+    if not any(kw in clean_text for kw in MGMT_KEYWORDS):
+        return False, None
+
     # ── HELPER: Fuzzy member finder ──────────────────────────────────────────
     def find_member_fuzzy(query: str) -> discord.Member | None:
         """Find member by mention, ID, exact name, nick, or partial name (case-insensitive)."""
