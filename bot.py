@@ -21,6 +21,9 @@ from discord.ext import commands
 from discord import app_commands
 from collections import deque
 from typing import Optional, List, Dict, Any, Union
+import base64
+import urllib.request
+import urllib.parse
 
 # Force UTF-8 output encoding across environments to avoid UnicodeEncodeError crashes
 try:
@@ -613,6 +616,9 @@ ROLES & ACTIONS:
 - ZERO INTERNAL MONOLOGUE / NO THINKING DUMP:
   NEVER output "Here's a thinking process:", "<think>", or any step-by-step reasoning analysis.
   Output ONLY Tillu's direct conversational words.
+
+- VISION & LINK UNDERSTANDING:
+  You have full vision and web/video understanding capabilities! When a user attaches an image, you receive an image analysis context `[USER ATTACHED IMAGE: ...]`. When a user shares a link or video, you receive link metadata `[YouTube Video: ...]` or `[Title: ...]`. Converse naturally as if you saw the image or watched the video yourself! Never mention internal prompt tags.
 """
 
 
@@ -636,6 +642,119 @@ def clean_thought_process(text: str) -> str:
         return ""
     
     return text.strip()
+
+
+# ── POLLINATIONS VISION & LINK UNDERSTANDING ─────────────────────────────────
+POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY", "")
+
+def analyze_image_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+    """Analyze Discord attachment image using Pollinations Vision endpoint."""
+    if not POLLINATIONS_API_KEY:
+        return ""
+    try:
+        b64_img = base64.b64encode(image_bytes).decode("utf-8")
+        data_uri = f"data:{mime_type};base64,{b64_img}"
+        headers = {
+            "Authorization": f"Bearer {POLLINATIONS_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": "openai",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Analyze and describe this image clearly and concisely in 2-4 sentences. Note key details, text, objects, memes, gameplay, errors, or context that a Discord assistant should understand."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_uri}
+                        }
+                    ]
+                }
+            ],
+            "max_tokens": 300
+        }
+        r = requests.post("https://gen.pollinations.ai/v1/chat/completions", headers=headers, json=payload, timeout=20)
+        if r.status_code == 200:
+            data = r.json()
+            choices = data.get("choices", [])
+            if choices:
+                desc = choices[0].get("message", {}).get("content", "").strip()
+                return clean_thought_process(desc)
+        else:
+            logging.warning(f"[Vision AI] HTTP {r.status_code}: {r.text[:120]}")
+    except Exception as e:
+        logging.error(f"[Vision AI] Error analyzing image: {e}")
+    return ""
+
+
+def fetch_url_context(url: str) -> str:
+    """Extract metadata (title, author, description) from video or web URLs."""
+    url = url.strip()
+    # 1. YouTube / Shorts / youtu.be
+    if any(domain in url.lower() for domain in ["youtube.com", "youtu.be"]):
+        clean_yt = url
+        if "/shorts/" in clean_yt:
+            clean_yt = clean_yt.replace("/shorts/", "/watch?v=")
+        try:
+            oembed_url = f"https://www.youtube.com/oembed?url={urllib.parse.quote(clean_yt, safe='')}&format=json"
+            req = urllib.request.Request(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode())
+                title = data.get("title", "")
+                author = data.get("author_name", "")
+                if title:
+                    return f"YouTube Video: \"{title}\" by {author}"
+        except Exception as e:
+            logging.debug(f"[YouTube oEmbed] Error fetching {url}: {e}")
+
+    # 2. General web links
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) TilluBot/1.0"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            raw = resp.read(65536).decode("utf-8", errors="ignore")
+            title_m = re.search(r'<title[^>]*>(.*?)</title>', raw, re.IGNORECASE | re.DOTALL)
+            og_title_m = re.search(r'<meta[^>]*property=["\']og:title["\'][^>]*content=["\'](.*?)["\']', raw, re.IGNORECASE)
+            og_desc_m = re.search(r'<meta[^>]*property=["\']og:description["\'][^>]*content=["\'](.*?)["\']', raw, re.IGNORECASE)
+            desc_m = re.search(r'<meta[^>]*name=["\']description["\'][^>]*content=["\'](.*?)["\']', raw, re.IGNORECASE)
+
+            title = (og_title_m.group(1) if og_title_m else (title_m.group(1) if title_m else "")).strip()
+            desc = (og_desc_m.group(1) if og_desc_m else (desc_m.group(1) if desc_m else "")).strip()
+            title = re.sub(r'&[a-zA-Z0-9#]+;', ' ', title).strip()
+            desc = re.sub(r'&[a-zA-Z0-9#]+;', ' ', desc).strip()
+
+            parts = []
+            if title:
+                parts.append(f"Title: {title}")
+            if desc:
+                parts.append(f"Description: {desc[:200]}")
+            if parts:
+                return " | ".join(parts)
+    except Exception as e:
+        logging.debug(f"[URL Context] Error fetching {url}: {e}")
+    return ""
+
+
+async def enrich_query_with_links(query: str) -> str:
+    """Detect URLs in query and prepend metadata context."""
+    if not query:
+        return query
+    urls = re.findall(r'https?://[^\s<>"]+', query)
+    if not urls:
+        return query
+    link_contexts = []
+    for u in urls[:2]:
+        u_clean = u.rstrip(".,!?:;)'\"")
+        ctx = await asyncio.to_thread(fetch_url_context, u_clean)
+        if ctx:
+            link_contexts.append(f"[{ctx}]")
+    if link_contexts:
+        prefix = " ".join(link_contexts)
+        return f"{prefix}\n{query}"
+    return query
 
 
 def query_nvidia(prompt: str, system_instruction: str = None, max_tokens: int = 600) -> Optional[str]:
@@ -1532,6 +1651,9 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
 
     is_admin = is_privileged_user(user, target_guild)
 
+    # Enrich query with link metadata if links/videos are present
+    query = await enrich_query_with_links(query)
+
     # Call Gemini in thread with user ID (10-chat context window), admin context, and owner status
     user_id = getattr(user, "id", 0)
     answer = await asyncio.to_thread(query_gemini, query, str(user), user_id, is_admin, author_is_owner, target_guild)
@@ -1689,8 +1811,24 @@ async def slash_tts(interaction: discord.Interaction, message: str):
     await interaction.channel.send(f"🗣️ **{interaction.user.name}:** {message}", tts=True)
     await interaction.response.send_message("🔊 TTS message bol diya!", ephemeral=True)
 @bot.tree.command(name="ask", description="Ask Tillu anything about the server, stream, or request whitelist!")
-@app_commands.describe(query="What would you like to ask Tillu? (e.g. 'whitelist me GamerX' or 'how to join SMP')")
-async def slash_ask(interaction: discord.Interaction, query: str):
+@app_commands.describe(
+    query="What would you like to ask Tillu? (e.g. 'whitelist me GamerX' or 'how to join SMP')",
+    attachment="Optional image screenshot or photo to show Tillu"
+)
+async def slash_ask(interaction: discord.Interaction, query: str, attachment: Optional[discord.Attachment] = None):
+    if attachment:
+        is_img = (attachment.content_type and attachment.content_type.startswith("image/")) or any(
+            attachment.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]
+        )
+        if is_img and attachment.size <= 8 * 1024 * 1024:
+            try:
+                img_bytes = await attachment.read()
+                mime = attachment.content_type or "image/jpeg"
+                desc = await asyncio.to_thread(analyze_image_bytes, img_bytes, mime)
+                if desc:
+                    query = f"[USER ATTACHED IMAGE: {desc}]\n{query}"
+            except Exception as e:
+                logging.error(f"[slash_ask Attachment] Error: {e}")
     await handle_ask_request(interaction, query, user=interaction.user, guild=interaction.guild)
 
 @bot.tree.command(name="start", description="Turn on the Minecraft server (anyone can use this!)")
@@ -1863,8 +2001,28 @@ async def slash_help(interaction: discord.Interaction):
 # ── TEXT COMMANDS ────────────────────────────────────────────────────────────
 @bot.command(name="tillu", aliases=["ask", "ai", "question"])
 async def cmd_tillu(ctx, *, query: str = None):
+    # Check for image attachments with !tillu
+    if ctx.message.attachments:
+        image_descs = []
+        for att in ctx.message.attachments[:2]:
+            is_img = (att.content_type and att.content_type.startswith("image/")) or any(
+                att.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]
+            )
+            if is_img and att.size <= 8 * 1024 * 1024:
+                try:
+                    img_bytes = await att.read()
+                    mime = att.content_type or "image/jpeg"
+                    desc = await asyncio.to_thread(analyze_image_bytes, img_bytes, mime)
+                    if desc:
+                        image_descs.append(desc)
+                except Exception as e:
+                    logging.error(f"[cmd_tillu Attachment] Error: {e}")
+        if image_descs:
+            img_ctx = "\n".join([f"- Image {i+1}: {d}" for i, d in enumerate(image_descs)]) if len(image_descs) > 1 else image_descs[0]
+            query = f"[USER ATTACHED IMAGE: {img_ctx}]\n{query}" if query else f"[USER ATTACHED IMAGE: {img_ctx}]\n(User shared this image with you without additional text. React or explain what you see in Tillu's persona!)"
+
     if not query:
-        await ctx.send("❌ Usage: `!tillu <your question or whitelist request>`")
+        await ctx.send("❌ Usage: `!tillu <your question, link, or image attachment>`")
         return
     await handle_ask_request(ctx, query, user=ctx.author, guild=ctx.guild)
 
@@ -1984,10 +2142,17 @@ async def delayed_video_reply(message: discord.Message):
         if not channel:
             return
 
+        url_match = re.search(r'https?://[^\s<>"]+', message.content)
+        url_context = ""
+        if url_match:
+            clean_u = url_match.group(0).rstrip(".,!?:;)'\"")
+            url_context = await asyncio.to_thread(fetch_url_context, clean_u)
+        video_info = f"Video/Link Details: {url_context}" if url_context else f"Content: '{message.content[:200]}'"
+
         prompt = (
-            f"A user posted this reel or video in our Discord chat: '{message.content[:200]}'. "
+            f"A user posted this reel or video in our Discord chat ({video_info}). "
             f"You are Tillu, an Indian AI streamer companion. You just watched it after 5 minutes! "
-            f"Write a funny, witty, short reaction (1-2 lines) in Hinglish/English reacting to the video or meme. "
+            f"Write a funny, witty, short reaction (1-2 lines) in Hinglish/English reacting specifically to this video, title, or meme. "
             f"Sound like a genuine friend laughing or reacting. Do NOT mention whitelist or server commands."
         )
         reaction = await asyncio.to_thread(query_gemini, prompt, "Tillu")
@@ -2297,7 +2462,13 @@ async def on_message(message: discord.Message):
                 is_reply_to_other = True
 
     content = message.content.strip()
-    if not content:
+    has_image = any(
+        (att.content_type and att.content_type.startswith("image/"))
+        or any(att.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"])
+        for att in message.attachments
+    )
+
+    if not content and not has_image:
         return
 
     global OWNER_ONLY_MODE
@@ -2333,6 +2504,37 @@ async def on_message(message: discord.Message):
         else:
             ACTIVE_USER_CONVERSATIONS.pop(session_key, None)
 
+    # SPECIAL CASE: Whitelist channel dedicated listener (Tillu ALWAYS reads and replies to every message here!)
+    is_whitelist_channel = (
+        message.channel.id == WHITELIST_CHANNEL_ID
+        or "whitelist" in getattr(message.channel, "name", "").lower()
+    )
+
+    is_targeted = (is_mentioned or is_reply_to_bot or match_tillu or is_active_session or is_whitelist_channel)
+
+    # If an image was attached and Tillu is targeted, analyze the image with Pollinations Vision
+    if has_image and is_targeted:
+        image_descs = []
+        for att in message.attachments[:2]:
+            is_img = (att.content_type and att.content_type.startswith("image/")) or any(
+                att.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+            )
+            if is_img and att.size <= 8 * 1024 * 1024:
+                try:
+                    img_bytes = await att.read()
+                    mime = att.content_type or ("image/png" if att.filename.lower().endswith(".png") else "image/jpeg")
+                    desc = await asyncio.to_thread(analyze_image_bytes, img_bytes, mime)
+                    if desc:
+                        image_descs.append(desc)
+                except Exception as e:
+                    logging.error(f"[on_message Attachment] Error reading image: {e}")
+        if image_descs:
+            img_ctx = "\n".join([f"- Image {i+1}: {d}" for i, d in enumerate(image_descs)]) if len(image_descs) > 1 else image_descs[0]
+            if content:
+                content = f"[USER ATTACHED IMAGE: {img_ctx}]\n{content}"
+            else:
+                content = f"[USER ATTACHED IMAGE: {img_ctx}]\n(User shared this image with you without additional text. React and explain what you see in Tillu's persona!)"
+
     # ── CHECK DIRECT MEMORY COMMAND ("tillu yaad rakh <baat>", "remember <fact>") ──
     is_mem, mem_topic, mem_fact = extract_memory_request(content)
     if is_mem and (match_tillu or is_mentioned or is_reply_to_bot or is_active_session):
@@ -2356,12 +2558,6 @@ async def on_message(message: discord.Message):
                 await mem_ch.send(embed=embed, view=view)
             await message.channel.send(f"📩 **Aapki request bhej di gayi hai!**\nAapki memory (*\"{mem_fact}\"*) maine review ke liye bhej di hai. Unke approve karte hi main isse yaad rakh lunga! 😄")
             return
-
-    # SPECIAL CASE: Whitelist channel dedicated listener (Tillu ALWAYS reads and replies to every message here!)
-    is_whitelist_channel = (
-        message.channel.id == WHITELIST_CHANNEL_ID
-        or "whitelist" in getattr(message.channel, "name", "").lower()
-    )
 
     if is_whitelist_channel:
         clean_word = content.strip().replace('"', '').replace("'", "").replace("`", "")
