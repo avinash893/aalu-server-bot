@@ -610,9 +610,32 @@ ROLES & ACTIONS:
   If a Server Owner or Moderator asks you to command, trigger, or control another bot in this server (e.g. TTS bot, music bot, Carl-bot, etc.):
   FIRST LINE: BOT_COMMAND: <exact_command_to_send> (e.g., BOT_COMMAND: !tts hello or BOT_COMMAND: !play song or BOT_COMMAND: !help)
   Followed by: a quick witty confirmation.
-  IF a regular member asks you to control or trigger other bots:
-  Refuse: "Doosre bots ko command dene ka haq sirf Server Owner aur Moderators ka hai! 🚫"
+- ZERO INTERNAL MONOLOGUE / NO THINKING DUMP:
+  NEVER output "Here's a thinking process:", "<think>", or any step-by-step reasoning analysis.
+  Output ONLY Tillu's direct conversational words.
 """
+
+
+def clean_thought_process(text: str) -> str:
+    """Bulletproof filter: Discards internal AI reasoning/thinking dumps so they never leak into Discord."""
+    if not text:
+        return ""
+    # 1. Strip standard <think> ... </think> tags
+    text = re.sub(r'<think>[\s\S]*?</think>', '', text, flags=re.IGNORECASE).strip()
+    
+    # 2. Check for "Here's a thinking process:" or chain-of-thought dumps
+    if re.search(r"here'?s a thinking process", text, re.IGNORECASE):
+        # Look specifically for a final response / polish line (with or without quotes)
+        match = re.search(r'(?:Final Polish|Final Response|Tillu:\s*|Response:\s*)\s*[:\-]?\s*["“]?([^\n\r"”]{3,250})["”]?', text, re.IGNORECASE)
+        if match:
+            candidate = match.group(1).strip()
+            if candidate and not any(k in candidate.lower() for k in ["analyze user", "thinking process", "check rules", "determine response", "draft response"]):
+                return candidate.strip('"\'- ')
+        
+        # If no clean final response line exists, discard this thought dump completely!
+        return ""
+    
+    return text.strip()
 
 
 def query_nvidia(prompt: str, system_instruction: str = None, max_tokens: int = 600) -> Optional[str]:
@@ -654,14 +677,10 @@ def query_nvidia(prompt: str, system_instruction: str = None, max_tokens: int = 
                     if choices:
                         msg = choices[0].get("message", {})
                         content = msg.get("content") or ""
-                        # Discard internal thinking/reasoning leak
-                        content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
-                        if "Here's a thinking process:" in content:
-                            parts = content.split("Here's a thinking process:")
-                            content = parts[-1].split("\n\n")[-1].strip().strip('"')
-                        if content and content.strip():
+                        cleaned = clean_thought_process(content)
+                        if cleaned and cleaned.strip():
                             nvidia_key_roller.record_success()
-                            return content.strip()
+                            return cleaned.strip()
                 elif r.status_code == 429:
                     logging.warning(f"[NVIDIA AI] {model} rate limited, rolling key...")
                     nvidia_key_roller.roll_on_error()
@@ -708,12 +727,9 @@ def query_groq(prompt: str, system_instruction: str = None, max_tokens: int = 60
                     if choices:
                         msg = choices[0].get("message", {})
                         content = msg.get("content", "")
-                        content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
-                        if "Here's a thinking process:" in content:
-                            parts = content.split("Here's a thinking process:")
-                            content = parts[-1].split("\n\n")[-1].strip().strip('"')
-                        if content and content.strip():
-                            return content.strip()
+                        cleaned = clean_thought_process(content)
+                        if cleaned and cleaned.strip():
+                            return cleaned.strip()
                 elif r.status_code == 429:
                     logging.warning(f"Groq {model} rate limited, trying next model...")
                     continue
@@ -924,12 +940,13 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
                     data = r.json()
                     text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
                     if text:
-                        text = text.strip()
-                        if user_id:
-                            record_user_context(user_id, "user", prompt)
-                            clean_text = re.sub(r'(ADMIN_INTENT|WHITELIST_INTENT|START_INTENT):[^\n\r]+', '', text).strip()
-                            record_user_context(user_id, "model", clean_text or text)
-                        return text
+                        text = clean_thought_process(text.strip())
+                        if text:
+                            if user_id:
+                                record_user_context(user_id, "user", prompt)
+                                clean_text = re.sub(r'(ADMIN_INTENT|WHITELIST_INTENT|START_INTENT):[^\n\r]+', '', text).strip()
+                                record_user_context(user_id, "model", clean_text or text)
+                            return text
                 else:
                     last_err = f"{model_name} HTTP {r.status_code}: {r.text[:120]}"
             except Exception as e:
@@ -1518,6 +1535,9 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
     # Call Gemini in thread with user ID (10-chat context window), admin context, and owner status
     user_id = getattr(user, "id", 0)
     answer = await asyncio.to_thread(query_gemini, query, str(user), user_id, is_admin, author_is_owner, target_guild)
+    answer = clean_thought_process(answer)
+    if not answer:
+        answer = "Haan bhai! Tillu hazir hai, bolo kya scene hai? 🚀"
 
     # 0. Check for START_INTENT (Start server via MCP Panel)
     if "START_INTENT:" in answer:
