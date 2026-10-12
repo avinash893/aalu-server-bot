@@ -639,14 +639,14 @@ def query_nvidia(prompt: str, system_instruction: str = None, max_tokens: int = 
             payload = {
                 "model": model,
                 "messages": messages,
-                "max_tokens": max(max_tokens, 300)
+                "max_tokens": max(max_tokens, 1000)
             }
             try:
                 r = requests.post(
                     "https://integrate.api.nvidia.com/v1/chat/completions",
                     headers=headers,
                     json=payload,
-                    timeout=8
+                    timeout=10
                 )
                 if r.status_code == 200:
                     data = r.json()
@@ -654,8 +654,11 @@ def query_nvidia(prompt: str, system_instruction: str = None, max_tokens: int = 
                     if choices:
                         msg = choices[0].get("message", {})
                         content = msg.get("content") or ""
-                        if not content and msg.get("reasoning_content"):
-                            content = msg.get("reasoning_content")
+                        # Discard internal thinking/reasoning leak
+                        content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+                        if "Here's a thinking process:" in content:
+                            parts = content.split("Here's a thinking process:")
+                            content = parts[-1].split("\n\n")[-1].strip().strip('"')
                         if content and content.strip():
                             nvidia_key_roller.record_success()
                             return content.strip()
@@ -705,6 +708,10 @@ def query_groq(prompt: str, system_instruction: str = None, max_tokens: int = 60
                     if choices:
                         msg = choices[0].get("message", {})
                         content = msg.get("content", "")
+                        content = re.sub(r'<think>[\s\S]*?</think>', '', content).strip()
+                        if "Here's a thinking process:" in content:
+                            parts = content.split("Here's a thinking process:")
+                            content = parts[-1].split("\n\n")[-1].strip().strip('"')
                         if content and content.strip():
                             return content.strip()
                 elif r.status_code == 429:
