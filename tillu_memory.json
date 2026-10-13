@@ -1,6 +1,6 @@
 {
-  "updated_at": "2026-10-12T21:59:30Z",
-  "count": 14,
+  "updated_at": "2026-10-13T01:00:19Z",
+  "count": 15,
   "memories": {
     "server_owner_is_avinash_aalu": {
       "topic": "server_owner_is_avinash_aalu",
@@ -85,6 +85,12 @@
       "content": "The final and correct server IP is noi7.visihost.in:25588",
       "updated_by": "avinashshah (Owner)",
       "updated_at": "2026-10-11 17:54:38 UTC"
+    },
+    "tillu_stop_start_mode": {
+      "topic": "tillu_stop_start_mode",
+      "content": "When Avinash (Owner) says \"tillu stop\", Tillu will not reply to anyone (not even Avinash). When Avinash says \"tillu start\", Tillu resumes replying to everyone.",
+      "updated_by": "avinashshah (Owner)",
+      "updated_at": "2026-10-13 01:00:19 UTC"
     }
   }
 }
