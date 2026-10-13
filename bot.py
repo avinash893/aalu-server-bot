@@ -2285,7 +2285,7 @@ async def cmd_drop_status(ctx):
         secs = remaining % 60
         await ctx.send(f"⏳ {ctx.author.mention}, agla drop claim karne ke liye **{mins}m {secs}s** wait karo. (Vault: `{len(pending)}` pending, Linked IGN: `{ign}`, Total Claims: `{total}`)")
 
-@bot.command(name="players", aliases=["online", "list", "listplayers", "whosonline", "onlineplayers"])
+@bot.command(name="players", aliases=["list", "listplayers", "whosonline", "onlineplayers", "whosplaying"])
 async def cmd_players(ctx):
     """Check live online Minecraft players and roles directly from server console."""
     await handle_players_command(ctx.channel, ctx.author)
