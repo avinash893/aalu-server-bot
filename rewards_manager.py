@@ -175,9 +175,15 @@ def roll_random_reward() -> dict:
     return random.choices(DROP_TABLE, weights=weights, k=1)[0]
 
 
-def claim_drop(user_id: int, ign: str, send_command_fn) -> Tuple[bool, dict, str]:
+def get_pending_claims(user_id: int) -> list:
+    """Get list of unclaimed items in user's vault."""
+    data = _load_data()
+    return data.get(str(user_id), {}).get("pending_claims", [])
+
+
+def claim_drop(user_id: int) -> Tuple[bool, dict, str]:
     """
-    Claim drop and deliver in-game via Minecraft MCP panel command.
+    Claim drop on Discord and save into user's rewards vault.
     Returns (success: bool, reward_dict: dict, status_message: str).
     """
     can_claim, remaining, total_claims = get_drop_status(user_id)
@@ -190,31 +196,79 @@ def claim_drop(user_id: int, ign: str, send_command_fn) -> Tuple[bool, dict, str
 
     # Roll reward
     reward = roll_random_reward()
-    clean_ign = ign.strip().replace('"', '').replace("'", '').replace(";", "")
 
-    # Execute console commands in Minecraft
-    give_cmd = f"give {clean_ign} {reward['cmd']}"
-    title_cmd = f'title {clean_ign} actionbar {{"text":"🎁 Discord Chat Drop: {reward["name"]}!","color":"gold"}}'
-
-    success, out = send_command_fn(give_cmd)
-    try:
-        send_command_fn(title_cmd)
-    except Exception:
-        pass
-
-    if not success:
-        logger.warning(f"Failed to dispatch give command to {clean_ign}: {out}")
-        return False, {}, f"⚠️ Minecraft console me reward deliver nahi hua: `{out}`. Kya server online hai?"
-
-    # Update record
+    # Save to user vault
     data = _load_data()
     uid = str(user_id)
     user_entry = data.get(uid, {})
     user_entry["last_claim_ts"] = int(time.time())
     user_entry["claims_count"] = user_entry.get("claims_count", 0) + 1
     user_entry["last_reward"] = reward["name"]
+
+    pending = user_entry.get("pending_claims", [])
+    pending.append({
+        "name": reward["name"],
+        "cmd": reward["cmd"],
+        "rarity": reward["rarity"],
+        "emoji": reward["emoji"],
+        "claimed_at": int(time.time())
+    })
+    user_entry["pending_claims"] = pending
     data[uid] = user_entry
     _save_data(data)
 
-    msg = f"🎉 **{reward['emoji']} {reward['name']}** (`{reward['rarity']}`) tumhare Minecraft inventory me deliver kar diya gaya hai!"
+    vault_count = len(pending)
+    msg = (
+        f"🎉 **{reward['emoji']} {reward['name']}** (`{reward['rarity']}`) tumhare Tillu Vault me add ho gaya hai!\n"
+        f"📦 Tumhare paas total `{vault_count}` claim(s) pending hain.\n"
+        f"In-game inventory me lene ke liye bolo: `tillu send my claims to my account` ya `tillu send my claims to <account_name>`!"
+    )
     return True, reward, msg
+
+
+def send_claims_to_account(user_id: int, target_ign: str, send_command_fn) -> Tuple[bool, list, str]:
+    """
+    Deliver all pending claims from user's vault to Minecraft account target_ign.
+    Returns (success: bool, delivered_items: list, message: str).
+    """
+    import re
+    data = _load_data()
+    uid = str(user_id)
+    user_entry = data.get(uid, {})
+    pending = user_entry.get("pending_claims", [])
+
+    if not pending:
+        return False, [], "📭 Tumhare vault me koi pending claims nahi hain! Pehle `!claim` se naya drop lo."
+
+    clean_ign = target_ign.strip().replace('"', '').replace("'", '').replace(";", "").replace("`", "")
+    if not clean_ign or not re.match(r'^[a-zA-Z0-9_.* ]{3,20}$', clean_ign):
+        return False, [], f"❌ Invalid Minecraft username `{target_ign}`!"
+
+    delivered = []
+    failed = []
+
+    for item in pending:
+        give_cmd = f"give {clean_ign} {item['cmd']}"
+        ok, out = send_command_fn(give_cmd)
+        if ok:
+            delivered.append(item)
+        else:
+            failed.append((item, out))
+
+    if not delivered and failed:
+        return False, [], f"⚠️ Server pe items deliver nahi hue: `{failed[0][1]}`. Kya Minecraft server online hai?"
+
+    try:
+        title_cmd = f'title {clean_ign} actionbar {{"text":"🎁 Delivered {len(delivered)} Discord claims!","color":"gold"}}'
+        send_command_fn(title_cmd)
+    except Exception:
+        pass
+
+    # Update vault: keep any failed items, remove delivered ones
+    user_entry["pending_claims"] = [f[0] for f in failed]
+    data[uid] = user_entry
+    _save_data(data)
+
+    items_summary = "\n".join(f"• {it['emoji']} **{it['name']}** (`{it['rarity']}`)" for it in delivered)
+    return True, delivered, f"🚀 **Successfully Delivered to `{clean_ign}`:**\n{items_summary}"
+

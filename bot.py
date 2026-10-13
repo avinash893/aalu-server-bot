@@ -2198,42 +2198,93 @@ async def cmd_claim_drop(ctx):
     if not ctx.guild:
         return await ctx.send("❌ Ye command sirf server ke andar use kar sakte hain!")
     import rewards_manager
-    reg = load_whitelist_registry()
-    uid = str(ctx.author.id)
-    entry = reg.get(uid)
-    if not entry or not entry.get("ign"):
-        return await ctx.send(f"❌ {ctx.author.mention}, pehle apna Minecraft IGN register karo: `!whitelist <your_ign>` ya `/whitelist <ign>`!")
-
-    ign = entry.get("ign")
-    success, reward, msg = rewards_manager.claim_drop(ctx.author.id, ign, panel_send_command)
+    success, reward, msg = rewards_manager.claim_drop(ctx.author.id)
     if not success:
         return await ctx.send(f"{ctx.author.mention} {msg}")
 
+    pending = rewards_manager.get_pending_claims(ctx.author.id)
     embed = discord.Embed(
         title="🎁 Free Minecraft Chat Drop Claimed!",
-        description=f"Congratulations {ctx.author.mention}! Tillu ne tumhara reward in-game inventory me bhej diya hai!",
+        description=f"Congratulations {ctx.author.mention}! Reward tumhare **Tillu Vault** me store ho gaya hai!",
         color=reward.get("color", 0xF1C40F)
     )
-    embed.set_thumbnail(url=f"https://mc-heads.net/avatar/{ign}/128")
-    embed.add_field(name="🎮 Player", value=f"`{ign}`", inline=True)
-    embed.add_field(name="📦 Reward", value=f"**{reward['emoji']} {reward['name']}**", inline=True)
+    embed.add_field(name="📦 Reward Added", value=f"**{reward['emoji']} {reward['name']}**", inline=True)
     embed.add_field(name="✨ Rarity", value=f"`{reward['rarity']}`", inline=True)
-    embed.add_field(name="💬 Chat to Earn More", value="Discord me chat karte raho aur har 2 ghante me free drop claim karo!", inline=False)
+    embed.add_field(name="🏦 Vault Balance", value=f"`{len(pending)}` item(s) pending", inline=True)
+    embed.add_field(
+        name="🚀 In-Game Deliver Karne Ka Tarika",
+        value="Server me aao aur bolo:\n• `tillu send my claims to my account`\n• `tillu send my claims to <account_name>`\n• ya `!sendclaims [account_name]`",
+        inline=False
+    )
     embed.set_footer(text="Tillu • Minecraft MCP Cloud Rewards")
+    await ctx.send(embed=embed)
+
+@bot.command(name="sendclaims", aliases=["deliverclaims", "sendclaim"])
+async def cmd_send_claims(ctx, *, target_account: str = ""):
+    if not ctx.guild:
+        return await ctx.send("❌ Ye command sirf server ke andar use kar sakte hain!")
+    import rewards_manager
+    reg = load_whitelist_registry()
+    uid = str(ctx.author.id)
+    entry = reg.get(uid, {})
+    linked_ign = entry.get("ign")
+
+    target_ign = target_account.strip()
+    if not target_ign or target_ign.lower() in ["my account", "me", "self", "my"]:
+        if not linked_ign:
+            return await ctx.send(f"❌ {ctx.author.mention}, tumhara koi account linked nahi hai! Apna IGN do: `!sendclaims <account_name>` ya pehle `!whitelist <ign>` karo.")
+        target_ign = linked_ign
+
+    msg_wait = await ctx.send(f"⏳ Delivering vault claims to `{target_ign}` via Minecraft console...")
+    success, items, msg = rewards_manager.send_claims_to_account(ctx.author.id, target_ign, panel_send_command)
+    if not success:
+        return await msg_wait.edit(content=f"{ctx.author.mention} {msg}")
+
+    embed = discord.Embed(
+        title="🚀 Claims Delivered In-Game!",
+        description=f"All claims have been transferred to **`{target_ign}`** in Minecraft!",
+        color=0x2ECC71
+    )
+    embed.set_thumbnail(url=f"https://mc-heads.net/avatar/{target_ign}/128")
+    items_list = "\n".join(f"• {it['emoji']} **{it['name']}** (`{it['rarity']}`)" for it in items)
+    embed.add_field(name="📦 Delivered Items", value=items_list or "Items delivered", inline=False)
+    embed.set_footer(text="Tillu • Minecraft MCP Cloud Rewards")
+    await msg_wait.delete()
+    await ctx.send(embed=embed)
+
+@bot.command(name="vault", aliases=["myclaims", "pendingclaims"])
+async def cmd_vault(ctx):
+    import rewards_manager
+    pending = rewards_manager.get_pending_claims(ctx.author.id)
+    if not pending:
+        return await ctx.send(f"📭 {ctx.author.mention}, tumhare vault me koi pending items nahi hain! Chat karo aur `!claim` se naya drop lo.")
+    items_list = "\n".join(f"• {it['emoji']} **{it['name']}** (`{it['rarity']}`)" for it in pending)
+    embed = discord.Embed(
+        title="🏦 Your Tillu Rewards Vault",
+        description=f"{ctx.author.mention}, tumhare paas `{len(pending)}` pending items hain:\n\n{items_list}",
+        color=0x9B59B6
+    )
+    embed.add_field(
+        name="🚀 Deliver Kaise Kare?",
+        value="Bolo: `tillu send my claims to my account` ya `tillu send my claims to <account_name>` (ya `!sendclaims`)",
+        inline=False
+    )
     await ctx.send(embed=embed)
 
 @bot.command(name="dropstatus", aliases=["claimstatus"])
 async def cmd_drop_status(ctx):
     import rewards_manager
     can_claim, remaining, total = rewards_manager.get_drop_status(ctx.author.id)
+    pending = rewards_manager.get_pending_claims(ctx.author.id)
     reg = load_whitelist_registry()
     ign = reg.get(str(ctx.author.id), {}).get("ign", "Not Linked")
     if can_claim:
-        await ctx.send(f"🎉 {ctx.author.mention}, tumhara free drop ready hai! Claim karne ke liye `!claim` type karo! (Linked IGN: `{ign}`, Total Claims: `{total}`)")
+        await ctx.send(f"🎉 {ctx.author.mention}, tumhara free drop ready hai! Claim karne ke liye `!claim` type karo! (Vault: `{len(pending)}` pending, Linked IGN: `{ign}`, Total Claims: `{total}`)")
     else:
         mins = remaining // 60
         secs = remaining % 60
-        await ctx.send(f"⏳ {ctx.author.mention}, agla drop claim karne ke liye **{mins}m {secs}s** wait karo. (Linked IGN: `{ign}`, Total Claims: `{total}`)")
+        await ctx.send(f"⏳ {ctx.author.mention}, agla drop claim karne ke liye **{mins}m {secs}s** wait karo. (Vault: `{len(pending)}` pending, Linked IGN: `{ign}`, Total Claims: `{total}`)")
+
 
 
 

@@ -426,8 +426,15 @@ async def parse_and_execute_discord_action(
         checked, assigned = await sync_manager.sync_guild_roles(guild, reg)
         return True, f"✅ **Minecraft Live Sync Complete!** `{checked}` registered accounts check hue, `{assigned}` naye Whitelisted roles assign kiye gaye!"
 
-    # MINECRAFT CHAT DROP CLAIM
+    # MINECRAFT CHAT DROP CLAIM (Discord Vault Deposit)
     if re.search(r'\b(?:claim\s+(?:free\s+)?drop|claim\s+reward|take\s+drop|my\s+drop)\b', clean_text) or clean_text in ["claim drop", "tillu claim", "claim drop please"]:
+        import rewards_manager
+        success, reward, msg = rewards_manager.claim_drop(author.id)
+        return True, f"{author.mention} {msg}"
+
+    # MINECRAFT SEND CLAIMS TO ACCOUNT
+    send_claims_m = re.search(r'(?:send\s+(?:my\s+)?claims?\s+to\s+(?:my\s+account|me|self|([a-zA-Z0-9_.* ]{3,20})))', clean_text)
+    if send_claims_m:
         import rewards_manager
         reg_file = os.path.join(os.path.dirname(__file__), "whitelist_registry.json")
         reg = {}
@@ -437,26 +444,44 @@ async def parse_and_execute_discord_action(
                     reg = json.load(f)
             except Exception:
                 pass
-        entry = reg.get(str(author.id))
-        if not entry or not entry.get("ign"):
-            return True, f"❌ {author.mention}, pehle apna Minecraft account link karo: `!whitelist <your_ign>` ya `/whitelist <ign>`!"
-        ign = entry.get("ign")
+        target_q = (send_claims_m.group(1) or "").strip()
+        linked_ign = reg.get(str(author.id), {}).get("ign")
+        target_ign = linked_ign if (not target_q or target_q.lower() in ["my account", "me", "self", "my"]) else target_q
+        if not target_ign:
+            return True, f"❌ {author.mention}, tumhara koi Minecraft account linked nahi hai! Bolo: `tillu send my claims to <account_name>` ya pehle `!whitelist <your_ign>` karo."
+
         try:
             import bot as _bot
             cmd_fn = _bot.panel_send_command
         except Exception:
             cmd_fn = lambda c: (False, "Command function unavailable")
-        success, reward, msg = rewards_manager.claim_drop(author.id, ign, cmd_fn)
-        return True, f"{author.mention} {msg}"
+
+        success, items, msg = rewards_manager.send_claims_to_account(author.id, target_ign, cmd_fn)
+        if not success:
+            return True, f"{author.mention} {msg}"
+
+        items_str = ", ".join(f"{it['emoji']} {it['name']}" for it in items)
+        return True, f"🚀 **Done Boss!** {author.mention} ke `{len(items)}` claims **`{target_ign}`** ko in-game deliver kar diye gaye!\nItems: {items_str} 🎉"
+
+    # MINECRAFT VAULT / PENDING CLAIMS INSPECTION
+    if clean_text in ["tillu vault", "vault", "my claims", "tillu my claims"]:
+        import rewards_manager
+        pending = rewards_manager.get_pending_claims(author.id)
+        if not pending:
+            return True, f"📭 {author.mention}, tumhare vault me koi pending items nahi hain! Chat karo aur `!claim` se naya drop lo."
+        items_list = ", ".join(f"{it['emoji']} {it['name']}" for it in pending)
+        return True, f"🏦 **{author.mention}'s Vault ({len(pending)} items):** {items_list}\nIn-game lene ke liye bolo: `tillu send my claims to my account`!"
 
     if re.search(r'\b(?:drop\s+status|claim\s+status|check\s+drop)\b', clean_text):
         import rewards_manager
         can_claim, remaining, total = rewards_manager.get_drop_status(author.id)
+        pending = rewards_manager.get_pending_claims(author.id)
         if can_claim:
-            return True, f"🎉 {author.mention}, tumhara free drop ready hai! Claim karne ke liye `!claim` type karo!"
+            return True, f"🎉 {author.mention}, tumhara free drop ready hai! Claim karne ke liye `!claim` type karo! (Vault: `{len(pending)}` pending items)"
         mins = remaining // 60
         secs = remaining % 60
-        return True, f"⏳ {author.mention}, agla drop claim karne ke liye **{mins}m {secs}s** wait karo. (Total Claims: `{total}`)"
+        return True, f"⏳ {author.mention}, agla drop claim karne ke liye **{mins}m {secs}s** wait karo. (Vault: `{len(pending)}` pending, Total Claims: `{total}`)"
+
 
 
 
