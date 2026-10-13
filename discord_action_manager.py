@@ -21,12 +21,12 @@ Given a natural language command from a privileged server admin/owner, extract t
 Return ONLY valid JSON. No explanation. Possible actions:
 
 {"action": "purge", "count": <number>, "channel": "<channel name or null>"}
-{"action": "create_role", "role_name": "<name>"}
+{"action": "create_role", "role_name": "<name>", "color": "<hex/color name or null>", "hoist": <true/false/null>, "mentionable": <true/false/null>, "permissions": ["administrator", "kick_members", "ban_members", "manage_channels", "manage_messages", "manage_roles", "moderate_members", "view_audit_log"]}
 {"action": "assign_role", "role_name": "<name>", "member": "<name/mention>"}
-{"action": "create_and_assign_role", "role_name": "<name>", "member": "<name/mention>"}
+{"action": "create_and_assign_role", "role_name": "<name>", "member": "<name/mention>", "color": "<hex/color or null>", "hoist": <true/false/null>, "mentionable": <true/false/null>, "permissions": [...]}
 {"action": "remove_role_from_server", "role_name": "<name>"}
 {"action": "remove_role_from_member", "role_name": "<name>", "member": "<name/mention>"}
-{"action": "create_channel", "channel_name": "<name>", "type": "text|voice"}
+{"action": "create_channel", "channel_name": "<name>", "type": "text|voice", "topic": "<topic or null>", "slowmode": <seconds or null>, "private": <true/false/null>}
 {"action": "delete_channel", "channel_name": "<name>"}
 {"action": "lock_channel", "channel_name": "<current or name>"}
 {"action": "unlock_channel", "channel_name": "<current or name>"}
@@ -36,12 +36,17 @@ Return ONLY valid JSON. No explanation. Possible actions:
 {"action": "none"}
 
 Rules:
+- "make this role:- <name> with this features ..." -> extract role_name cleanly, and parse color, hoist, mentionable, permissions.
+- "hoist" means display separately in member list (true/false).
+- Colors: red, blue, green, yellow, orange, purple, pink, cyan, gold, dark_blue, dark_red, or hex like #ff0000.
+- Permissions: administrator, kick_members, ban_members, manage_channels, manage_messages, manage_roles, moderate_members, view_audit_log.
 - "remove the role X from discord" → remove_role_from_server
 - "remove role X from @user" → remove_role_from_member
 - "delete N messages/chats" → purge
 - "only mods can post in #channel" → restrict_posting
 - If action is not Discord-related → {"action": "none"}
 """
+
 
 import random
 import threading
@@ -102,7 +107,7 @@ def _nvidia_classify_action(text: str) -> dict:
                             {"role": "system", "content": _GROQ_SYSTEM},
                             {"role": "user", "content": text}
                         ],
-                        "max_tokens": 250,
+                        "max_tokens": 350,
                         "temperature": 0
                     },
                     timeout=5
@@ -112,7 +117,7 @@ def _nvidia_classify_action(text: str) -> dict:
                     choices = data.get("choices", [])
                     if choices:
                         msg = choices[0].get("message", {})
-                        content = msg.get("content") or msg.get("reasoning_content") or ""
+                        content = (msg.get("content") or msg.get("reasoning_content") or "").strip()
                         match = re.search(r'\{[\s\S]*?\}', content)
                         if match:
                             parsed = json.loads(match.group(0))
@@ -155,13 +160,14 @@ def _groq_classify_action(text: str) -> dict:
                                 {"role": "system", "content": _GROQ_SYSTEM},
                                 {"role": "user", "content": text}
                             ],
-                            "max_tokens": 150,
+                            "max_tokens": 350,
                             "temperature": 0
                         },
                         timeout=3
                     )
                     if r.status_code == 200:
-                        content = r.json()["choices"][0]["message"]["content"].strip()
+                        msg = r.json()["choices"][0].get("message", {})
+                        content = (msg.get("content") or msg.get("reasoning_content") or "").strip()
                         # Extract JSON (handles markdown codeblocks like ```json { ... } ```)
                         match = re.search(r'\{[\s\S]*?\}', content)
                         if match:
@@ -177,6 +183,113 @@ def _groq_classify_action(text: str) -> dict:
     except Exception as e:
         logger.warning(f"[DiscordActionAI] classify error: {e}")
     return {}
+
+COLOR_MAP = {
+    "red": discord.Color.red(),
+    "blue": discord.Color.blue(),
+    "green": discord.Color.green(),
+    "yellow": discord.Color.gold(),
+    "orange": discord.Color.orange(),
+    "purple": discord.Color.purple(),
+    "pink": discord.Color.magenta(),
+    "gold": discord.Color.gold(),
+    "teal": discord.Color.teal(),
+    "cyan": discord.Color.teal(),
+    "dark_blue": discord.Color.dark_blue(),
+    "dark_red": discord.Color.dark_red(),
+    "blurple": discord.Color.blurple(),
+    "grey": discord.Color.light_grey(),
+    "gray": discord.Color.light_grey(),
+    "white": discord.Color.from_rgb(255, 255, 255),
+    "black": discord.Color.default(),
+}
+
+def parse_role_features(data: dict = None, raw_text: str = "") -> Tuple[dict, list]:
+    """Parse role features (color, hoist, mentionable, permissions) from AI data or natural language text."""
+    data = data or {}
+    combined_text = f"{raw_text} {json.dumps(data) if data else ''}".lower()
+
+    kwargs = {}
+    details = []
+
+    # 1. Color
+    c_val = data.get("color") or data.get("colour")
+    color_obj = None
+    if c_val:
+        c_str = str(c_val).lower().strip()
+        if c_str.startswith("#"):
+            try:
+                color_obj = discord.Color(int(c_str.lstrip("#"), 16))
+            except Exception:
+                pass
+        elif c_str in COLOR_MAP:
+            color_obj = COLOR_MAP[c_str]
+
+    if not color_obj:
+        hex_match = re.search(r'#([0-9a-fA-F]{6})', combined_text)
+        if hex_match:
+            try:
+                color_obj = discord.Color(int(hex_match.group(1), 16))
+            except Exception:
+                pass
+        else:
+            for cname, cobj in COLOR_MAP.items():
+                if re.search(r'\b' + cname.replace('_', '[_ ]') + r'(?:\s+colou?r)?\b', combined_text):
+                    color_obj = cobj
+                    break
+
+    if color_obj:
+        kwargs["color"] = color_obj
+        details.append(f"🎨 Color: `{color_obj}`")
+
+    # 2. Hoist (Display separately in sidebar)
+    hoist_val = data.get("hoist")
+    if hoist_val is True or re.search(r'\b(hoist|separate|separately|alag\s+se)\b', combined_text):
+        kwargs["hoist"] = True
+        details.append("📌 Separate Display: Yes")
+    elif hoist_val is False:
+        kwargs["hoist"] = False
+
+    # 3. Mentionable
+    ment_val = data.get("mentionable")
+    if ment_val is False or re.search(r'\b(not\s+mentionable|no\s+mention|mention\s+off)\b', combined_text):
+        kwargs["mentionable"] = False
+        details.append("🔕 Mentionable: No")
+    else:
+        kwargs["mentionable"] = True
+
+    # 4. Permissions
+    perms = set()
+    raw_perms = data.get("permissions", [])
+    if isinstance(raw_perms, list):
+        for p in raw_perms:
+            perms.add(str(p).lower().strip())
+
+    PERM_MAP = {
+        "administrator": ["admin", "administrator"],
+        "kick_members": ["kick", "kick_members", "kick members"],
+        "ban_members": ["ban", "ban_members", "ban members"],
+        "manage_channels": ["manage_channels", "manage channel", "manage channels"],
+        "manage_messages": ["manage_messages", "manage message", "delete messages", "manage messages"],
+        "manage_roles": ["manage_roles", "manage role", "manage roles"],
+        "view_audit_log": ["view_audit_log", "audit log"],
+        "moderate_members": ["moderate_members", "timeout", "mute members"],
+        "mention_everyone": ["mention_everyone", "mention everyone", "ping everyone"],
+        "manage_guild": ["manage_server", "manage_guild", "manage server"],
+    }
+
+    perm_kwargs = {}
+    for perm_attr, aliases in PERM_MAP.items():
+        if any(a in perms for a in aliases) or any(re.search(r'\b' + re.escape(a) + r'\b', combined_text) for a in aliases):
+            perm_kwargs[perm_attr] = True
+
+    if perm_kwargs:
+        kwargs["permissions"] = discord.Permissions(**perm_kwargs)
+        formatted_perms = ", ".join(k.replace("_", " ").title() for k in perm_kwargs)
+        details.append(f"🛡️ Permissions: {formatted_perms}")
+
+    return kwargs, details
+
 
 async def parse_and_execute_discord_action(
     message: discord.Message,
@@ -297,25 +410,30 @@ async def parse_and_execute_discord_action(
             return True, f"❌ Role `{role_q}` nahi mila!"
 
     # 3. CREATE ROLE (without assigning)
-    # e.g., "create role Creators", "tillu create a role named VIP", "make role Creators"
+    # e.g., "create role Creators", "make this role:- fhsfhif with this features something something", "make role VIP with red color, hoist, admin"
     create_role_match = re.search(
-        r'(?:create|make|bana)\s+(?:a\s+)?(?:new\s+)?role\s+(?:named?\s+|called?\s+)?["\']?([^"\']+)["\']?',
-        clean_text
+        r'(?:create|make|bana(?:\s+do)?)\s+(?:a\s+)?(?:new\s+)?(?:this\s+|ye\s+)?role\s*(?:named?\s*[:-]*\s*|called?\s*[:-]*\s*|[:-]+\s*)?["\']?([^"\'\n:]+?)["\']?(?:\s+(?:with|having|ke\s+saath)\s+(?:this\s+)?(?:features?\s*[:-]*\s*)?(.+))?$',
+        text,
+        re.IGNORECASE
     )
-    if create_role_match and not re.search(r'(?:give|add|assign)', clean_text):
-        role_name = create_role_match.group(1).strip().title()
+    if create_role_match and not re.search(r'(?:give|add|assign|de\s+do)', clean_text):
+        role_name = create_role_match.group(1).strip().strip('"\'').title()
+        features_str = create_role_match.group(2).strip() if create_role_match.group(2) else ""
         existing = find_role_fuzzy(role_name)
         if existing:
             return True, f"ℹ️ Role `{existing.name}` pehle se exist karta hai! Use karna ho to assign karo."
         try:
+            role_kwargs, feat_details = parse_role_features(raw_text=features_str or text)
             new_role = await guild.create_role(
                 name=role_name,
-                mentionable=True,
-                reason=f"Created by Tillu via {author.name}"
+                reason=f"Created by Tillu via {author.name}",
+                **role_kwargs
             )
-            return True, f"🎭 **Role Created!** Naya role `{new_role.name}` ban gaya hai! Assign karne ke liye bolna: `tillu give role {new_role.name} to @user`"
+            feat_msg = ("\n" + " | ".join(feat_details)) if feat_details else ""
+            return True, f"🎭 **Role Created!** Naya role `{new_role.name}` ban gaya hai!{feat_msg}\nAssign karne ke liye bolna: `tillu give role {new_role.name} to @user`"
         except Exception as e:
             return True, f"⚠️ Role create error: {e}"
+
 
     # 4. GIVE / ADD ROLE (also handles: "create role X and add Y to it")
     # e.g., "tillu give role VIP to @user", "create role Creators and add uniqueumar to it"
@@ -625,23 +743,36 @@ async def parse_and_execute_discord_action(
         if not role_name:
             return False, None
         existing = find_role_fuzzy(role_name)
+        role_kwargs, feat_details = parse_role_features(data=ai_result, raw_text=text)
         if not existing:
             try:
-                existing = await guild.create_role(name=role_name, mentionable=True, reason=f"Created by Tillu via {author.name}")
+                existing = await guild.create_role(
+                    name=role_name,
+                    reason=f"Created by Tillu via {author.name}",
+                    **role_kwargs
+                )
             except Exception as e:
                 return True, f"⚠️ Role create error: {e}"
-        msg = f"🎭 **Role Created!** `{existing.name}` ban gaya!"
+        else:
+            try:
+                if role_kwargs:
+                    await existing.edit(reason=f"Updated features by Tillu via {author.name}", **role_kwargs)
+            except Exception:
+                pass
+
+        feat_msg = ("\n" + " | ".join(feat_details)) if feat_details else ""
+        msg = f"🎭 **Role Created!** `{existing.name}` ban gaya!{feat_msg}"
         if ai_action == "create_and_assign_role":
             member_q = ai_result.get("member", "")
             target = find_member_fuzzy(member_q)
             if target:
                 try:
                     await target.add_roles(existing, reason=f"Assigned by Tillu via {author.name}")
-                    msg += f" Aur {target.mention} ko assign kar diya! 🎉"
+                    msg += f"\nAur {target.mention} ko assign kar diya! 🎉"
                 except Exception as e:
                     msg += f" (Role assign error: {e})"
             else:
-                msg += f" ⚠️ Member `{member_q}` nahi mila, role create hua hai — manually assign karo."
+                msg += f"\n⚠️ Member `{member_q}` nahi mila, role create hua hai — manually assign karo."
         return True, msg
 
     elif ai_action == "assign_role":
@@ -649,8 +780,13 @@ async def parse_and_execute_discord_action(
         member_q = ai_result.get("member", "")
         role = find_role_fuzzy(role_name) or find_role_fuzzy(role_name.title())
         if not role:
+            role_kwargs, _ = parse_role_features(data=ai_result, raw_text=text)
             try:
-                role = await guild.create_role(name=role_name.title(), mentionable=True, reason=f"Auto-created by Tillu via {author.name}")
+                role = await guild.create_role(
+                    name=role_name.title(),
+                    reason=f"Auto-created by Tillu via {author.name}",
+                    **role_kwargs
+                )
             except Exception as e:
                 return True, f"⚠️ Role nahi mila aur create nahi hua: {e}"
         target = find_member_fuzzy(member_q)
@@ -691,14 +827,29 @@ async def parse_and_execute_discord_action(
     elif ai_action == "create_channel":
         ch_name = ai_result.get("channel_name", "").strip().lower().replace(" ", "-")
         ch_type = ai_result.get("type", "text")
+        topic = ai_result.get("topic")
+        slowmode = ai_result.get("slowmode")
+        is_private = ai_result.get("private", False)
         try:
             if ch_type == "voice":
                 new_ch = await guild.create_voice_channel(name=ch_name, reason=f"Created by Tillu via {author.name}")
             else:
-                new_ch = await guild.create_text_channel(name=ch_name, reason=f"Created by Tillu via {author.name}")
+                ch_kwargs = {"name": ch_name, "reason": f"Created by Tillu via {author.name}"}
+                if topic:
+                    ch_kwargs["topic"] = str(topic)
+                if slowmode and isinstance(slowmode, (int, float)):
+                    ch_kwargs["slowmode_delay"] = int(slowmode)
+                if is_private:
+                    overwrites = {
+                        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+                        author: discord.PermissionOverwrite(view_channel=True, send_messages=True)
+                    }
+                    ch_kwargs["overwrites"] = overwrites
+                new_ch = await guild.create_text_channel(**ch_kwargs)
             return True, f"📁 **Channel Created!** {new_ch.mention} ready hai!"
         except Exception as e:
             return True, f"⚠️ Channel create error: {e}"
+
 
     elif ai_action == "delete_channel":
         ch_name = ai_result.get("channel_name", "").strip()
