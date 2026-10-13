@@ -319,7 +319,7 @@ async def parse_and_execute_discord_action(
     MGMT_KEYWORDS = [
         "role", "channel", "delete", "purge", "clear", "remove", "saaf", "hata", "mute", "timeout",
         "lock", "unlock", "slowmode", "topic", "rename", "category", "clone", "clip", "post in",
-        "permission", "creators", "admin", "backup", "restore", "snapshot"
+        "permission", "creators", "admin", "backup", "restore", "snapshot", "sync", "claim", "drop"
     ]
     if not any(kw in clean_text for kw in MGMT_KEYWORDS):
         return False, None
@@ -409,6 +409,55 @@ async def parse_and_execute_discord_action(
             sec = "server"
         success, msg = await backup_manager.restore_section(guild, sec)
         return True, msg
+
+    # MINECRAFT LIVE SYNC
+    if re.search(r'\b(?:sync\s+(?:roles?|minecraft|whitelist)|livesync)\b', clean_text) or clean_text in ["tillu sync", "sync roles", "sync now"]:
+        if not (author.guild_permissions.administrator or guild.owner_id == author.id):
+            return True, "🚫 Sirf Server Owner ya Administrators hi sync kar sakte hain!"
+        import sync_manager
+        reg = {}
+        reg_file = os.path.join(os.path.dirname(__file__), "whitelist_registry.json")
+        if os.path.exists(reg_file):
+            try:
+                with open(reg_file, "r", encoding="utf-8") as f:
+                    reg = json.load(f)
+            except Exception:
+                pass
+        checked, assigned = await sync_manager.sync_guild_roles(guild, reg)
+        return True, f"✅ **Minecraft Live Sync Complete!** `{checked}` registered accounts check hue, `{assigned}` naye Whitelisted roles assign kiye gaye!"
+
+    # MINECRAFT CHAT DROP CLAIM
+    if re.search(r'\b(?:claim\s+(?:free\s+)?drop|claim\s+reward|take\s+drop|my\s+drop)\b', clean_text) or clean_text in ["claim drop", "tillu claim", "claim drop please"]:
+        import rewards_manager
+        reg_file = os.path.join(os.path.dirname(__file__), "whitelist_registry.json")
+        reg = {}
+        if os.path.exists(reg_file):
+            try:
+                with open(reg_file, "r", encoding="utf-8") as f:
+                    reg = json.load(f)
+            except Exception:
+                pass
+        entry = reg.get(str(author.id))
+        if not entry or not entry.get("ign"):
+            return True, f"❌ {author.mention}, pehle apna Minecraft account link karo: `!whitelist <your_ign>` ya `/whitelist <ign>`!"
+        ign = entry.get("ign")
+        try:
+            import bot as _bot
+            cmd_fn = _bot.panel_send_command
+        except Exception:
+            cmd_fn = lambda c: (False, "Command function unavailable")
+        success, reward, msg = rewards_manager.claim_drop(author.id, ign, cmd_fn)
+        return True, f"{author.mention} {msg}"
+
+    if re.search(r'\b(?:drop\s+status|claim\s+status|check\s+drop)\b', clean_text):
+        import rewards_manager
+        can_claim, remaining, total = rewards_manager.get_drop_status(author.id)
+        if can_claim:
+            return True, f"🎉 {author.mention}, tumhara free drop ready hai! Claim karne ke liye `!claim` type karo!"
+        mins = remaining // 60
+        secs = remaining % 60
+        return True, f"⏳ {author.mention}, agla drop claim karne ke liye **{mins}m {secs}s** wait karo. (Total Claims: `{total}`)"
+
 
 
     # 1. PURGE / DELETE MESSAGES

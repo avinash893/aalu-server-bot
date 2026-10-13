@@ -17,7 +17,7 @@ import aiohttp
 from aiohttp import web
 import requests
 import discord
-from discord.ext import commands
+from discord.ext import commands, tasks
 from discord import app_commands
 from collections import deque
 from typing import Optional, List, Dict, Any, Union
@@ -1713,6 +1713,13 @@ async def handle_whitelist_request(interaction_or_ctx, ign: str, user, guild=Non
 
     await reply_fn(embed=embed, view=ServerControlView())
 
+    if target_guild and isinstance(user, discord.Member):
+        try:
+            import sync_manager
+            asyncio.create_task(sync_manager.sync_single_member(target_guild, user, clean_ign))
+        except Exception:
+            pass
+
 async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, bypass_cooldown: bool = False):
     """Processes user query with Gemini AI, supporting natural conversation and whitelist requests."""
     is_inter = isinstance(interaction_or_ctx, discord.Interaction)
@@ -2174,6 +2181,61 @@ async def cmd_backups(ctx):
         return await ctx.send("📂 Abhi tak koi backup snapshot create nahi hua hai. `!backup` se create karo!")
     await ctx.send(f"📂 **Available Backups:**\n" + "\n".join(f"• `{b}`" for b in b_list[:5]))
 
+@bot.command(name="sync", aliases=["syncroles", "livesync"])
+async def cmd_sync(ctx):
+    if not ctx.guild:
+        return await ctx.send("❌ Ye command sirf server ke andar use kar sakte hain!")
+    if not (ctx.author.guild_permissions.administrator or ctx.guild.owner_id == ctx.author.id):
+        return await ctx.send("🚫 Sirf Server Owner ya Administrators hi sync trigger kar sakte hain!")
+    import sync_manager
+    msg_wait = await ctx.send("🔄 **Minecraft Live Sync running...** Checking registered players...")
+    reg = load_whitelist_registry()
+    checked, assigned = await sync_manager.sync_guild_roles(ctx.guild, reg)
+    await msg_wait.edit(content=f"✅ **Live Sync Complete!** `{checked}` registered players check hue, `{assigned}` naye Whitelisted roles assign kiye gaye!")
+
+@bot.command(name="claim", aliases=["drop", "claimdrop", "freedrop"])
+async def cmd_claim_drop(ctx):
+    if not ctx.guild:
+        return await ctx.send("❌ Ye command sirf server ke andar use kar sakte hain!")
+    import rewards_manager
+    reg = load_whitelist_registry()
+    uid = str(ctx.author.id)
+    entry = reg.get(uid)
+    if not entry or not entry.get("ign"):
+        return await ctx.send(f"❌ {ctx.author.mention}, pehle apna Minecraft IGN register karo: `!whitelist <your_ign>` ya `/whitelist <ign>`!")
+
+    ign = entry.get("ign")
+    success, reward, msg = rewards_manager.claim_drop(ctx.author.id, ign, panel_send_command)
+    if not success:
+        return await ctx.send(f"{ctx.author.mention} {msg}")
+
+    embed = discord.Embed(
+        title="🎁 Free Minecraft Chat Drop Claimed!",
+        description=f"Congratulations {ctx.author.mention}! Tillu ne tumhara reward in-game inventory me bhej diya hai!",
+        color=reward.get("color", 0xF1C40F)
+    )
+    embed.set_thumbnail(url=f"https://mc-heads.net/avatar/{ign}/128")
+    embed.add_field(name="🎮 Player", value=f"`{ign}`", inline=True)
+    embed.add_field(name="📦 Reward", value=f"**{reward['emoji']} {reward['name']}**", inline=True)
+    embed.add_field(name="✨ Rarity", value=f"`{reward['rarity']}`", inline=True)
+    embed.add_field(name="💬 Chat to Earn More", value="Discord me chat karte raho aur har 2 ghante me free drop claim karo!", inline=False)
+    embed.set_footer(text="Tillu • Minecraft MCP Cloud Rewards")
+    await ctx.send(embed=embed)
+
+@bot.command(name="dropstatus", aliases=["claimstatus"])
+async def cmd_drop_status(ctx):
+    import rewards_manager
+    can_claim, remaining, total = rewards_manager.get_drop_status(ctx.author.id)
+    reg = load_whitelist_registry()
+    ign = reg.get(str(ctx.author.id), {}).get("ign", "Not Linked")
+    if can_claim:
+        await ctx.send(f"🎉 {ctx.author.mention}, tumhara free drop ready hai! Claim karne ke liye `!claim` type karo! (Linked IGN: `{ign}`, Total Claims: `{total}`)")
+    else:
+        mins = remaining // 60
+        secs = remaining % 60
+        await ctx.send(f"⏳ {ctx.author.mention}, agla drop claim karne ke liye **{mins}m {secs}s** wait karo. (Linked IGN: `{ign}`, Total Claims: `{total}`)")
+
+
 
 @bot.command(name="tillu", aliases=["ask", "ai", "question"])
 async def cmd_tillu(ctx, *, query: str = None):
@@ -2278,7 +2340,17 @@ async def cmd_unwhitelist(ctx, player: str = None):
     reg = load_whitelist_registry()
     new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower() != clean_p.lower()}
     save_whitelist_registry(new_reg)
+    import sync_manager
+    for uid_str, udata in reg.items():
+        if udata.get("ign", "").lower() == clean_p.lower():
+            try:
+                mem = ctx.guild.get_member(int(uid_str))
+                if mem:
+                    asyncio.create_task(sync_manager.remove_single_member_sync(ctx.guild, mem))
+            except Exception:
+                pass
     await ctx.send(f"🗑️ **[Whitelist Removed]** `{clean_p}` has been removed from the whitelist.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
+
 
 @bot.command(name="start", aliases=["startserver", "turnon", "on"])
 async def cmd_start(ctx):
@@ -2480,6 +2552,15 @@ async def on_message(message: discord.Message):
     # Only ignore Tillu himself to prevent self-looping (allow access/interaction with other bots)
     if bot.user and message.author.id == bot.user.id:
         return
+
+    # Record chat activity for Minecraft Chat Drops
+    if not message.author.bot:
+        try:
+            import rewards_manager
+            rewards_manager.record_chat_activity(message.author.id)
+        except Exception:
+            pass
+
 
     # ── AUTONOMOUS RULE ENGINE: Evaluate message against active rules ────────
     try:
@@ -2832,6 +2913,29 @@ async def guardian_loop():
             pass
         await asyncio.sleep(1800)
 
+# ── SCHEDULED BACKGROUND LOOPS (Automated 24h Backup & Live Sync) ───────────
+@tasks.loop(hours=24)
+async def scheduled_backup_loop():
+    import backup_manager
+    for g in bot.guilds:
+        try:
+            s, m, _ = backup_manager.create_backup(g)
+            d = backup_manager.cleanup_old_backups(g.id, max_keep=7, max_age_days=7)
+            logging.info(f"[AutoBackup] {g.name}: {m} (Cleaned {d} old snapshots)")
+        except Exception as ex:
+            logging.error(f"[AutoBackup] Error on {g.name}: {ex}")
+
+@tasks.loop(hours=6)
+async def scheduled_sync_loop():
+    import sync_manager
+    reg = load_whitelist_registry()
+    for g in bot.guilds:
+        try:
+            c, a = await sync_manager.sync_guild_roles(g, reg)
+            logging.info(f"[AutoLiveSync] {g.name}: checked {c}, assigned {a} roles")
+        except Exception as ex:
+            logging.error(f"[AutoLiveSync] Error on {g.name}: {ex}")
+
 @bot.event
 async def on_ready():
     logging.info(f"==========================================================")
@@ -2858,6 +2962,19 @@ async def on_ready():
 
     asyncio.create_task(guardian_loop())
     asyncio.create_task(render_keepalive_loop())
+
+    try:
+        if not scheduled_backup_loop.is_running():
+            scheduled_backup_loop.start()
+    except Exception as be:
+        logging.warning(f"[ScheduledBackup Init] {be}")
+
+    try:
+        if not scheduled_sync_loop.is_running():
+            scheduled_sync_loop.start()
+    except Exception as se:
+        logging.warning(f"[ScheduledSync Init] {se}")
+
 
 async def main():
     try:

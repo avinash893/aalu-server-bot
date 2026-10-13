@@ -155,6 +155,37 @@ def list_backups(guild_id: int) -> List[str]:
     return sorted(files, reverse=True)
 
 
+def cleanup_old_backups(guild_id: int, max_keep: int = 10, max_age_days: int = 7) -> int:
+    """Delete backups older than max_age_days or exceeding max_keep count. Returns deleted count."""
+    prefix = f"backup_{guild_id}_"
+    deleted = 0
+    if not os.path.exists(BACKUP_DIR):
+        return 0
+
+    files = []
+    now = datetime.datetime.now(datetime.timezone.utc)
+    for fname in os.listdir(BACKUP_DIR):
+        if fname.startswith(prefix) and fname.endswith(".json") and "latest" not in fname:
+            fpath = os.path.join(BACKUP_DIR, fname)
+            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(fpath), tz=datetime.timezone.utc)
+            files.append((fname, fpath, mtime))
+
+    files.sort(key=lambda x: x[2], reverse=True)
+
+    for i, (fname, fpath, mtime) in enumerate(files):
+        age_days = (now - mtime).total_seconds() / 86400.0
+        if age_days > max_age_days or i >= max_keep:
+            try:
+                os.remove(fpath)
+                deleted += 1
+                logger.info(f"Cleaned up old backup: {fname}")
+            except Exception as e:
+                logger.warning(f"Failed to delete old backup {fname}: {e}")
+
+    return deleted
+
+
+
 async def _rebuild_overwrites(
     guild: discord.Guild,
     raw_overwrites: List[dict]
