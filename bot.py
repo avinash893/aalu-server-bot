@@ -2144,6 +2144,37 @@ async def cmd_resume(ctx):
     TILLU_PAUSED = False
     await ctx.send("▶️ **Tillu Resumed!** Main wapas active hu, bolo kya scene hai! 🚀")
 
+@bot.command(name="backup", aliases=["serverbackup"])
+async def cmd_backup(ctx):
+    if not ctx.guild:
+        return await ctx.send("❌ Ye command sirf server ke andar use kar sakte hain!")
+    if not (ctx.author.guild_permissions.administrator or ctx.guild.owner_id == ctx.author.id):
+        return await ctx.send("🚫 Sirf Server Owner ya Administrators hi backup le sakte hain!")
+    import backup_manager
+    success, msg, _ = backup_manager.create_backup(ctx.guild)
+    await ctx.send(msg)
+
+@bot.command(name="restore", aliases=["serverrestore"])
+async def cmd_restore(ctx, section: str = "server", *, target: str = ""):
+    if not ctx.guild:
+        return await ctx.send("❌ Ye command sirf server ke andar use kar sakte hain!")
+    if not (ctx.author.guild_permissions.administrator or ctx.guild.owner_id == ctx.author.id):
+        return await ctx.send("🚫 Sirf Server Owner ya Administrators hi restore kar sakte hain!")
+    import backup_manager
+    success, msg = await backup_manager.restore_section(ctx.guild, section, specific_target=target)
+    await ctx.send(msg)
+
+@bot.command(name="backups", aliases=["listbackups"])
+async def cmd_backups(ctx):
+    if not ctx.guild:
+        return await ctx.send("❌ Ye command sirf server ke andar use kar sakte hain!")
+    import backup_manager
+    b_list = backup_manager.list_backups(ctx.guild.id)
+    if not b_list:
+        return await ctx.send("📂 Abhi tak koi backup snapshot create nahi hua hai. `!backup` se create karo!")
+    await ctx.send(f"📂 **Available Backups:**\n" + "\n".join(f"• `{b}`" for b in b_list[:5]))
+
+
 @bot.command(name="tillu", aliases=["ask", "ai", "question"])
 async def cmd_tillu(ctx, *, query: str = None):
     # Check for image attachments with !tillu

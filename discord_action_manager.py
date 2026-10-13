@@ -33,10 +33,18 @@ Return ONLY valid JSON. No explanation. Possible actions:
 {"action": "restrict_posting", "channel_name": "<name>", "allowed_roles": ["moderator","admin"]}
 {"action": "rename_channel", "channel_name": "<old>", "new_name": "<new>"}
 {"action": "timeout", "member": "<name>", "minutes": <number>}
+{"action": "backup_server"}
+{"action": "list_backups"}
+{"action": "restore_section", "section": "roles|categories|channels|permissions|server|channel|role", "target": "<name or null>"}
 {"action": "none"}
 
 Rules:
+- "backup server" / "server backup" / "take backup" → backup_server
+- "restore roles" / "restore channels" / "restore permissions" / "restore server" → restore_section with section
+- "restore channel <name>" → restore_section with section "channel" and target "<name>"
+- "restore role <name>" → restore_section with section "role" and target "<name>"
 - "make this role:- <name> with this features ..." -> extract role_name cleanly, and parse color, hoist, mentionable, permissions.
+
 - "hoist" means display separately in member list (true/false).
 - Colors: red, blue, green, yellow, orange, purple, pink, cyan, gold, dark_blue, dark_red, or hex like #ff0000.
 - Permissions: administrator, kick_members, ban_members, manage_channels, manage_messages, manage_roles, moderate_members, view_audit_log.
@@ -311,7 +319,7 @@ async def parse_and_execute_discord_action(
     MGMT_KEYWORDS = [
         "role", "channel", "delete", "purge", "clear", "remove", "saaf", "hata", "mute", "timeout",
         "lock", "unlock", "slowmode", "topic", "rename", "category", "clone", "clip", "post in",
-        "permission", "creators", "admin"
+        "permission", "creators", "admin", "backup", "restore", "snapshot"
     ]
     if not any(kw in clean_text for kw in MGMT_KEYWORDS):
         return False, None
@@ -355,6 +363,53 @@ async def parse_and_execute_discord_action(
     # ═════════════════════════════════════════════════════════════════════════
     # ── STEP 1: INSTANT LOCAL REGEX PARSING (0ms latency, zero network) ─────
     # ═════════════════════════════════════════════════════════════════════════
+
+    # 0. BACKUP & RESTORE SERVER ARCHITECTURE
+    if re.search(r'\b(?:create\s+|take\s+)?backup\s+(?:of\s+)?(?:this\s+)?(?:server|discord|guild)?\b', clean_text) or clean_text in ["tillu backup", "backup server", "server backup", "take backup"]:
+        if not (author.guild_permissions.administrator or guild.owner_id == author.id):
+            return True, "🚫 Sirf Server Owner ya Administrators hi backup le sakte hain!"
+        import backup_manager
+        success, msg, _ = backup_manager.create_backup(guild)
+        return True, msg
+
+    if re.search(r'\b(?:list\s+backups?|backups?\s+list|show\s+backups?)\b', clean_text):
+        import backup_manager
+        b_list = backup_manager.list_backups(guild.id)
+        if not b_list:
+            return True, "📂 Abhi tak koi backup snapshot create nahi hua hai. `tillu backup server` se create karo!"
+        return True, f"📂 **Available Backups:**\n" + "\n".join(f"• `{b}`" for b in b_list[:5])
+
+    restore_ch_m = re.search(r'restore\s+channel\s+(?:<#\d+>|#?([a-zA-Z0-9_\-]+))', clean_text)
+    if restore_ch_m:
+        if not (author.guild_permissions.administrator or guild.owner_id == author.id):
+            return True, "🚫 Sirf Server Owner ya Administrators hi restore kar sakte hain!"
+        import backup_manager
+        ch_target = restore_ch_m.group(1).strip()
+        success, msg = await backup_manager.restore_section(guild, "channel", specific_target=ch_target)
+        return True, msg
+
+    restore_r_m = re.search(r'restore\s+role\s+["\']?([^"\']+)["\']?', clean_text)
+    if restore_r_m:
+        if not (author.guild_permissions.administrator or guild.owner_id == author.id):
+            return True, "🚫 Sirf Server Owner ya Administrators hi restore kar sakte hain!"
+        import backup_manager
+        r_target = restore_r_m.group(1).strip()
+        success, msg = await backup_manager.restore_section(guild, "role", specific_target=r_target)
+        return True, msg
+
+    restore_sec_m = re.search(r'restore\s+(roles?|channels?|categories|permissions?|server|all|architecture)', clean_text)
+    if restore_sec_m:
+        if not (author.guild_permissions.administrator or guild.owner_id == author.id):
+            return True, "🚫 Sirf Server Owner ya Administrators hi restore kar sakte hain!"
+        import backup_manager
+        sec = restore_sec_m.group(1).rstrip('s')
+        if sec in ["role", "channel", "permission"]:
+            sec = sec + "s"
+        elif sec in ["architecture", "all"]:
+            sec = "server"
+        success, msg = await backup_manager.restore_section(guild, sec)
+        return True, msg
+
 
     # 1. PURGE / DELETE MESSAGES
     # e.g., "tillu delete 10 messages", "purge 20", "delete 4 of your recent messages in admin"
@@ -936,4 +991,28 @@ async def parse_and_execute_discord_action(
         except Exception as e:
             return True, f"⚠️ Timeout error: {e}"
 
+    elif ai_action == "backup_server":
+        if not (author.guild_permissions.administrator or guild.owner_id == author.id):
+            return True, "🚫 Sirf Server Owner ya Administrators hi backup le sakte hain!"
+        import backup_manager
+        success, msg, _ = backup_manager.create_backup(guild)
+        return True, msg
+
+    elif ai_action == "list_backups":
+        import backup_manager
+        b_list = backup_manager.list_backups(guild.id)
+        if not b_list:
+            return True, "📂 Abhi tak koi backup snapshot create nahi hua hai. `tillu backup server` se create karo!"
+        return True, f"📂 **Available Backups:**\n" + "\n".join(f"• `{b}`" for b in b_list[:5])
+
+    elif ai_action == "restore_section":
+        if not (author.guild_permissions.administrator or guild.owner_id == author.id):
+            return True, "🚫 Sirf Server Owner ya Administrators hi restore kar sakte hain!"
+        import backup_manager
+        section = ai_result.get("section", "server")
+        target = ai_result.get("target") or ""
+        success, msg = await backup_manager.restore_section(guild, section, specific_target=target)
+        return True, msg
+
     return False, None
+
