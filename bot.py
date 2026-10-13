@@ -2285,8 +2285,10 @@ async def cmd_drop_status(ctx):
         secs = remaining % 60
         await ctx.send(f"⏳ {ctx.author.mention}, agla drop claim karne ke liye **{mins}m {secs}s** wait karo. (Vault: `{len(pending)}` pending, Linked IGN: `{ign}`, Total Claims: `{total}`)")
 
-
-
+@bot.command(name="players", aliases=["online", "list", "listplayers", "whosonline", "onlineplayers"])
+async def cmd_players(ctx):
+    """Check live online Minecraft players and roles directly from server console."""
+    await handle_players_command(ctx.channel, ctx.author)
 
 @bot.command(name="tillu", aliases=["ask", "ai", "question"])
 async def cmd_tillu(ctx, *, query: str = None):
@@ -2579,6 +2581,109 @@ def format_whitelisted_players_embed(content: str) -> Optional[discord.Embed]:
     embed.set_footer(text="Arranged Alphabetically (A–Z) followed by Symbols • Tillu Auto-Formatter")
     return embed
 
+def strip_console_prefix(line: str) -> str:
+    """Strips timestamps, thread prefixes like [Server thread/INFO]: from console output."""
+    return re.sub(r'^(?:\[[^\]]+\]\s*)+:?\s*', '', line).strip()
+
+def format_online_players_embed(content: str) -> Optional[discord.Embed]:
+    """Parse raw console '/list' output and format into a rich embed."""
+    clean = content.strip()
+    count_m = re.search(r'There are (\d+)(?:\s+(?:out\s+of\s+maximum|of\s+a\s+max\s+of)\s+(\d+))?\s+players\s+online', clean, re.IGNORECASE)
+    online_count = int(count_m.group(1)) if count_m else 0
+    max_count = int(count_m.group(2)) if (count_m and count_m.group(2)) else 50
+
+    embed = discord.Embed(
+        title=f"🎮 Live Minecraft Players ({online_count}/{max_count})",
+        color=0x2ECC71 if online_count > 0 else 0x95A5A6,
+        timestamp=discord.utils.utcnow()
+    )
+
+    if online_count == 0:
+        embed.description = "Abhi server pe koi player online nahi hai! (No players currently online)\nJoin karke pehle player bano! 🚀"
+        embed.add_field(name="☕ Server IP", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
+        embed.set_footer(text="Tillu • Live Console Telemetry")
+        return embed
+
+    # Parse groups and player names
+    player_groups = {}
+    lines = [strip_console_prefix(l) for l in clean.splitlines() if strip_console_prefix(l)]
+
+    for l in lines:
+        if ':' in l and 'players online' not in l.lower():
+            parts = l.split(':', 1)
+            group_name = parts[0].strip().title()
+            p_names = [p.strip() for p in parts[1].split(',') if p.strip()]
+            if p_names:
+                player_groups[group_name] = p_names
+
+    if not player_groups:
+        for l in lines:
+            if 'players online' in l.lower() and ':' in l:
+                after_colon = l.split(':', 1)[-1].strip()
+                p_names = [p.strip() for p in after_colon.split(',') if p.strip()]
+                if p_names and p_names != [l]:
+                    player_groups["Online Players"] = p_names
+                    break
+
+    if player_groups:
+        for grp, members in player_groups.items():
+            formatted_list = " • ".join(f"`{m}`" for m in members)
+            embed.add_field(name=f"👑 {grp} [{len(members)}]", value=formatted_list, inline=False)
+    else:
+        embed.description = f"**{online_count}** player(s) abhi server pe khel rahe hain!"
+
+    embed.add_field(name="☕ Server IP", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
+    embed.set_footer(text="Tillu • Live Console Telemetry")
+    return embed
+
+async def handle_players_command(channel, user=None):
+    """Sends '/list' to console, captures output, and displays live player count and names in chat."""
+    status_msg = await channel.send("🔍 **Fetching live players from Minecraft console...**")
+
+    # Send 'list' command to console
+    await execute_server_command("list")
+
+    # Wait for response in console channel or fallback to server ping
+    try:
+        def check(m):
+            return m.channel.id == CONSOLE_CHANNEL_ID and "players online" in (m.content or "").lower()
+        resp_msg = await bot.wait_for("message", check=check, timeout=5.0)
+        full_content = resp_msg.content or ""
+
+        # If online_count > 0 and no group lines were present in this single message, check if following lines arrive
+        count_m = re.search(r'There are (\d+)', full_content, re.IGNORECASE)
+        online_cnt = int(count_m.group(1)) if count_m else 0
+        if online_cnt > 0 and ":" not in full_content.splitlines()[-1]:
+            try:
+                next_msg = await bot.wait_for(
+                    "message",
+                    check=lambda m: m.channel.id == CONSOLE_CHANNEL_ID and m.id != resp_msg.id,
+                    timeout=1.5
+                )
+                if next_msg and next_msg.content:
+                    full_content += "\n" + next_msg.content
+            except asyncio.TimeoutError:
+                pass
+
+        embed = format_online_players_embed(full_content)
+        if embed:
+            await status_msg.edit(content=None, embed=embed)
+            return
+    except asyncio.TimeoutError:
+        pass
+
+    # Fallback to direct SLP Ping if console didn't respond in time
+    is_up, desc, online, max_p, ver = await asyncio.to_thread(ping_minecraft_server)
+    embed = discord.Embed(
+        title=f"🎮 Live Minecraft Players ({online}/{max_p})",
+        description=f"Status: **{desc}**\nVersion: `{ver}`",
+        color=0x2ECC71 if is_up and online > 0 else (0xF1C40F if is_up else 0xE74C3C),
+        timestamp=discord.utils.utcnow()
+    )
+    embed.add_field(name="☕ Server IP", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
+    embed.set_footer(text="Tillu • Live Server Telemetry")
+    await status_msg.edit(content=None, embed=embed)
+
 @bot.event
 async def on_message(message: discord.Message):
     # ── CONSOLE CHANNEL: Intercept & Format 'whitelist list' output ───────────
@@ -2601,6 +2706,7 @@ async def on_message(message: discord.Message):
                 return
 
     # Only ignore Tillu himself to prevent self-looping (allow access/interaction with other bots)
+
     if bot.user and message.author.id == bot.user.id:
         return
 
@@ -2899,6 +3005,12 @@ async def on_message(message: discord.Message):
     query = re.sub(r'^(hey\s+|yo\s+|hello\s+|hi\s+|arre\s+)?(mr\s*tillu|tillu)[\s,:]*', '', query, flags=re.IGNORECASE).strip()
     if not query:
         query = content
+
+    # ── LIVE MINECRAFT PLAYERS CHECK (Natural language intent) ─────────────────
+    clean_q = query.lower().strip()
+    if re.search(r'\b(?:players?|who\s+is\s+(?:playing|online)|kaun\s+(?:khel\s+raha\s+hai|online\s+hai|khel\s+rahe\s+hain|khel\s+raha)|kitne\s+(?:players?|log)\s+(?:khel\s+rahe|online)\s+hai|list\s+players?)\b', clean_q) or clean_q in ["players", "online", "list", "who is playing", "kaun khel raha hai"]:
+        await handle_players_command(message.channel, message.author)
+        return
 
     try:
         async with message.channel.typing():
