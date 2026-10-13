@@ -193,13 +193,9 @@ def record_user_context(user_id: int, role: str, text: str):
 COOLDOWN_SECONDS = 20
 user_cooldowns = {}
 
-# ── ACTIVE CONVERSATION SESSION (Awake state) ───────────────────────────────
-CONVERSATION_TIMEOUT_SECONDS = 120
-ACTIVE_USER_CONVERSATIONS: dict[tuple[int, int], float] = {}
-
+# ── TILLU PAUSE STATE & PERMISSIONS ──────────────────────────────────────────
+TILLU_PAUSED = False
 WHITELIST_REGISTRY_PATH = os.path.join(os.path.dirname(__file__), "whitelist_registry.json")
-
-# ── COOLDOWN & PERMISSIONS ───────────────────────────────────────────────────
 OWNER_ONLY_MODE = False
 
 def is_owner(user, guild=None) -> bool:
@@ -619,6 +615,10 @@ ROLES & ACTIONS:
 
 - VISION & LINK UNDERSTANDING:
   You have full vision and web/video understanding capabilities! When a user attaches an image, you receive an image analysis context `[USER ATTACHED IMAGE: ...]`. When a user shares a link or video, you receive link metadata `[YouTube Video: ...]` or `[Title: ...]`. Converse naturally as if you saw the image or watched the video yourself! Never mention internal prompt tags.
+
+- CONVERSATION & 2-MESSAGE CONTEXT AWARENESS:
+  You receive at most two messages: a [REFERENCED CONTEXT MESSAGE] (e.g. what the user or someone else said before, the upper message, or a searched message) and the [CURRENT USER QUERY].
+  Use the referenced message to understand follow-up questions, reply to "upar wala message", or discuss what someone else said. Never mention prompt headers like "[REFERENCED CONTEXT MESSAGE]" or "[CURRENT USER QUERY]" in your response; speak directly and naturally to the user in Tillu's persona!
 """
 
 
@@ -755,6 +755,121 @@ async def enrich_query_with_links(query: str) -> str:
         prefix = " ".join(link_contexts)
         return f"{prefix}\n{query}"
     return query
+
+
+async def find_channel_context_message(message: discord.Message, query: str) -> Optional[dict]:
+    """Retrieves exactly 1 context message from channel history using simple deterministic search (no AI).
+    Supports:
+    - Direct Discord reply reference
+    - 'mere upar wala' / 'mera pichla message' (user's own previous message)
+    - 'upar wala message' / 'above message' (immediate preceding message)
+    - Mentioning or naming another user ('Rohit ka message dekh', '@User ne kya bola')
+    - Quoted text or keyword search (e.g. 'jisme "coords" ho')
+    - Default fallback: Back of 1 message from the same user (or channel)
+    Returns: {'author': str, 'content': str} or None.
+    """
+    if not hasattr(message, "channel") or not hasattr(message.channel, "history"):
+        return None
+
+    # 1. Direct Discord reply reference
+    if getattr(message, "reference", None) and message.reference.resolved:
+        resolved = message.reference.resolved
+        if isinstance(resolved, discord.Message) and resolved.id != message.id:
+            txt = resolved.clean_content or resolved.content or ""
+            if txt:
+                author_name = getattr(resolved.author, "display_name", "") or resolved.author.name
+                return {"author": author_name, "content": txt[:400]}
+
+    recent = []
+    try:
+        async for m in message.channel.history(limit=50, before=message):
+            if m.id == message.id:
+                continue
+            recent.append(m)
+    except Exception as e:
+        logging.warning(f"[find_channel_context_message] History fetch error: {e}")
+        return None
+
+    if not recent:
+        return None
+
+    query_lower = query.lower()
+
+    # 2. Check for 'mere upar wala' / 'mera pichla' (same user's previous message)
+    is_my_prev = bool(re.search(r'\b(mere\s*upar|mera\s*pichla|my\s*previous|my\s*last|mere\s*pehle)\b', query_lower))
+    if is_my_prev:
+        for m in recent:
+            if m.author.id == message.author.id:
+                txt = m.clean_content or m.content or ""
+                if txt:
+                    return {"author": getattr(m.author, "display_name", "") or m.author.name, "content": txt[:400]}
+
+    # 3. Check for general 'upar wala message' / 'above message' (message right above)
+    is_upper = bool(re.search(r'\b(upar\s*wala|upar\s*wale|upper\s*(?:one|message)|above\s*message|last\s*message|pichla\s*message|previous\s*message)\b', query_lower))
+    if is_upper:
+        for m in recent:
+            if bot.user and m.author.id == bot.user.id:
+                continue
+            txt = m.clean_content or m.content or ""
+            if txt:
+                return {"author": getattr(m.author, "display_name", "") or m.author.name, "content": txt[:400]}
+
+    # 4. User @mentioned another user
+    for user_mention in getattr(message, "mentions", []):
+        if bot.user and user_mention.id == bot.user.id:
+            continue
+        for m in recent:
+            if m.author.id == user_mention.id:
+                txt = m.clean_content or m.content or ""
+                if txt:
+                    return {"author": getattr(m.author, "display_name", "") or m.author.name, "content": txt[:400]}
+
+    # 5. User mentioned someone by name ('rohit ka message', 'dekh dev ne kya bola')
+    name_m = re.search(r'\b([a-zA-Z0-9_]{3,20})\s+(?:ka|ki|ke|ne)\s+(?:message|kya|bola|likha)\b', query, re.IGNORECASE)
+    if name_m:
+        target_name = name_m.group(1).lower()
+        if target_name not in ["tillu", "mr", "koi", "ye", "wo", "kya", "mera", "mere", "tera", "uska"]:
+            for m in recent:
+                author_names = [m.author.name.lower(), getattr(m.author, "display_name", "").lower()]
+                if any(target_name in an for an in author_names):
+                    txt = m.clean_content or m.content or ""
+                    if txt:
+                        return {"author": getattr(m.author, "display_name", "") or m.author.name, "content": txt[:400]}
+
+    # 6. Quoted text search (Ctrl+F)
+    quotes = re.findall(r'["\']([^"\']{2,40})["\']', query)
+    if quotes:
+        for q_term in quotes:
+            term_clean = q_term.lower().strip()
+            for m in recent:
+                txt = m.clean_content or m.content or ""
+                if term_clean in txt.lower():
+                    return {"author": getattr(m.author, "display_name", "") or m.author.name, "content": txt[:400]}
+
+    # 7. Word search ('jisme <word>')
+    contain_m = re.search(r'\b(?:jisme|containing|having|search\s*for)\s+([a-zA-Z0-9_]{3,30})\b', query_lower)
+    if contain_m:
+        term = contain_m.group(1)
+        for m in recent:
+            txt = m.clean_content or m.content or ""
+            if term in txt.lower():
+                return {"author": getattr(m.author, "display_name", "") or m.author.name, "content": txt[:400]}
+
+    # 8. Default fallback: Same user's previous message (back of 1 message)
+    for m in recent:
+        if m.author.id == message.author.id:
+            txt = m.clean_content or m.content or ""
+            if txt:
+                return {"author": getattr(m.author, "display_name", "") or m.author.name, "content": txt[:400]}
+
+    # If no message by same user, take immediate preceding message
+    if recent:
+        first_m = recent[0]
+        txt = first_m.clean_content or first_m.content or ""
+        if txt:
+            return {"author": getattr(first_m.author, "display_name", "") or first_m.author.name, "content": txt[:400]}
+
+    return None
 
 
 def query_nvidia(prompt: str, system_instruction: str = None, max_tokens: int = 600) -> Optional[str]:
@@ -987,15 +1102,6 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
         if other_bots:
             bots_summary = f"[OTHER BOTS ACTIVE IN THIS SERVER]: {', '.join(other_bots)}\n(Only Server Owner & Moderators can instruct you to control these bots).\n"
 
-    context_str = ""
-    history = get_user_context(user_id)
-    if history:
-        history_lines = []
-        for h in history:
-            speaker = user_name if h["role"] == "user" else "Tillu"
-            history_lines.append(f"{speaker}: {h['text']}")
-        context_str = "\n[CONVERSATION CONTEXT (LAST 10 CHATS WITH THIS USER)]:\n" + "\n".join(history_lines) + "\n"
-
     memory_context = memory_mgr.get_formatted_context()
     prompt_ext = prompt_mgr.get_formatted_prompt_extension()
 
@@ -1005,9 +1111,8 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
         f"{memory_context}\n\n"
         f"{live_telemetry}\n\n"
         f"{bots_summary}"
-        f"{user_role_tag}\n"
-        f"{context_str}\n"
-        f"Current Query from {user_name}: {prompt}\n"
+        f"{user_role_tag}\n\n"
+        f"Input from {user_name}:\n{prompt}\n\n"
         f"Tillu's Response:"
     )
 
@@ -1651,10 +1756,26 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
 
     is_admin = is_privileged_user(user, target_guild)
 
-    # Enrich query with link metadata if links/videos are present
+    # 1. Retrieve exactly 1 referenced context message (upper message, searched user message, or previous message)
+    msg_obj = interaction_or_ctx if isinstance(interaction_or_ctx, discord.Message) else getattr(interaction_or_ctx, "message", None)
+    if msg_obj and hasattr(msg_obj, "channel"):
+        try:
+            ctx_msg = await find_channel_context_message(msg_obj, query)
+            if ctx_msg:
+                user_display = getattr(user, 'display_name', '') or getattr(user, 'name', str(user))
+                query = (
+                    f"[REFERENCED CONTEXT MESSAGE]\n"
+                    f"{ctx_msg['author']}: \"{ctx_msg['content']}\"\n\n"
+                    f"[CURRENT USER QUERY]\n"
+                    f"{user_display}: \"{query}\""
+                )
+        except Exception as ce:
+            logging.warning(f"[find_channel_context_message] Error: {ce}")
+
+    # 2. Enrich query with link metadata if links/videos are present
     query = await enrich_query_with_links(query)
 
-    # Call Gemini in thread with user ID (10-chat context window), admin context, and owner status
+    # Call LLM in thread with user ID, admin context, and owner status
     user_id = getattr(user, "id", 0)
     answer = await asyncio.to_thread(query_gemini, query, str(user), user_id, is_admin, author_is_owner, target_guild)
     answer = clean_thought_process(answer)
@@ -1805,6 +1926,18 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
             await reply_fn(content=answer)
 
 # ── SLASH COMMANDS ───────────────────────────────────────────────────────────
+@bot.tree.command(name="pause", description="Pause Tillu so he stops responding to chat messages")
+async def slash_pause(interaction: discord.Interaction):
+    global TILLU_PAUSED
+    TILLU_PAUSED = True
+    await interaction.response.send_message("⏸️ **Tillu Paused!** Main chup ho gaya hu. Wapas bulane ke liye `/resume` ya `tillu resume` bol dena.")
+
+@bot.tree.command(name="resume", description="Resume Tillu so he starts responding to chat again")
+async def slash_resume(interaction: discord.Interaction):
+    global TILLU_PAUSED
+    TILLU_PAUSED = False
+    await interaction.response.send_message("▶️ **Tillu Resumed!** Main wapas active hu, bolo kya scene hai! 🚀")
+
 @bot.tree.command(name="tts", description="Make Tillu speak out loud using Discord TTS")
 @app_commands.describe(message="The message Tillu should speak out loud")
 async def slash_tts(interaction: discord.Interaction, message: str):
@@ -1999,6 +2132,18 @@ async def slash_help(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=ServerControlView(), ephemeral=True)
 
 # ── TEXT COMMANDS ────────────────────────────────────────────────────────────
+@bot.command(name="pause")
+async def cmd_pause(ctx):
+    global TILLU_PAUSED
+    TILLU_PAUSED = True
+    await ctx.send("⏸️ **Tillu Paused!** Main chup ho gaya hu. Wapas bulane ke liye `!resume` ya `tillu resume` bol dena.")
+
+@bot.command(name="resume", aliases=["unpause"])
+async def cmd_resume(ctx):
+    global TILLU_PAUSED
+    TILLU_PAUSED = False
+    await ctx.send("▶️ **Tillu Resumed!** Main wapas active hu, bolo kya scene hai! 🚀")
+
 @bot.command(name="tillu", aliases=["ask", "ai", "question"])
 async def cmd_tillu(ctx, *, query: str = None):
     # Check for image attachments with !tillu
@@ -2471,18 +2616,32 @@ async def on_message(message: discord.Message):
     if not content and not has_image:
         return
 
-    global OWNER_ONLY_MODE
+    global OWNER_ONLY_MODE, TILLU_PAUSED
     author = message.author
     author_is_owner = is_owner(author, message.guild)
+    content_lower = content.lower().strip()
+
+    # ── TILLU PAUSE & RESUME COMMANDS ──────────────────────────────────────────
+    if re.search(r'^(?:hey\s+|arre\s+)?(?:tillu|mr\s*tillu)?\s*(?:pause|roko|ruk\s*ja|stop\s*responding|chup\s*ho\s*ja)$', content_lower) or content_lower in ["!pause", "tillu pause"]:
+        TILLU_PAUSED = True
+        await message.channel.send("⏸️ **Tillu Paused!** Main chup ho gaya hu. Wapas bulane ke liye `tillu resume` ya `tillu start` bol dena.")
+        return
+
+    if re.search(r'^(?:hey\s+|arre\s+)?(?:tillu|mr\s*tillu)?\s*(?:resume|unpause|start|bolna\s*shuru|wapas\s*aa\s*ja)$', content_lower) or content_lower in ["!resume", "!unpause", "tillu resume", "tillu unpause"]:
+        TILLU_PAUSED = False
+        await message.channel.send("▶️ **Tillu Resumed!** Main wapas active hu, bolo kya scene hai! 🚀")
+        return
+
+    # If Tillu is paused, ignore all messages
+    if TILLU_PAUSED:
+        return
 
     # ── OWNER COMMANDS (STOP / RESUME SILENT MODE) ─────────────────────────────
-    # If the Server Owner (Avinash) tells Tillu to stop / quiet / chup:
     if author_is_owner and re.search(r'^(?:hey\s+|arre\s+)?(?:tillu|mr\s*tillu)?\s*(?:stop|quiet|chup|shant|mute|chup\s*raho|bolna\s*band|shut\s*up|so\s*ja)$', content, re.IGNORECASE):
         OWNER_ONLY_MODE = True
         await message.channel.send("🤫 **Yes Boss (Avinash)!** Muh pe taala laga liya. Ab se main **sirf aapki sununga**, baaki sab ignore mode me hain.")
         return
 
-    # If the Server Owner tells Tillu to speak / start / unmute / resume:
     if author_is_owner and re.search(r'^(?:hey\s+|arre\s+)?(?:tillu|mr\s*tillu)?\s*(?:start|unmute|resume|bolna\s*shuru\s*kar|chalu\s*ho\s*ja|ab\s*sabse\s*bol|aawaz\s*nikal|unstop)$', content, re.IGNORECASE):
         OWNER_ONLY_MODE = False
         await message.channel.send("🚀 **Boss ka green signal aa gaya!** Tillu is back in action for everyone! Sab log sawaal pucho.")
@@ -2493,27 +2652,38 @@ async def on_message(message: discord.Message):
         return
 
     match_tillu = bool(re.search(r'\b(tillu|mr\s*tillu)\b', content, re.IGNORECASE))
-    is_dismissal = bool(re.search(r'\b(bye|good\s*night|goodnight|tata|alvida|so\s*ja|shubh\s*ratri|stop\s*talking|chup\s*raho)\b', content, re.IGNORECASE))
 
-    session_key = (message.author.id, message.channel.id)
-    now = time.time()
-    is_active_session = False
-    if session_key in ACTIVE_USER_CONVERSATIONS:
-        if now - ACTIVE_USER_CONVERSATIONS[session_key] <= CONVERSATION_TIMEOUT_SECONDS:
-            is_active_session = True
-        else:
-            ACTIVE_USER_CONVERSATIONS.pop(session_key, None)
-
-    # SPECIAL CASE: Whitelist channel dedicated listener (Tillu ALWAYS reads and replies to every message here!)
+    # Whitelist channel dedicated check
     is_whitelist_channel = (
         message.channel.id == WHITELIST_CHANNEL_ID
         or "whitelist" in getattr(message.channel, "name", "").lower()
     )
 
-    is_targeted = (is_mentioned or is_reply_to_bot or match_tillu or is_active_session or is_whitelist_channel)
+    # Check if message is addressed to Tillu:
+    # 1. Mentioned (@Tillu)
+    # 2. Reply to Tillu
+    # 3. Explicitly named "tillu" or "mr tillu"
+    is_addressed_to_tillu = is_mentioned or is_reply_to_bot or match_tillu
 
-    # If an image was attached and Tillu is targeted, analyze the image with Pollinations Vision
-    if has_image and is_targeted:
+    # If in whitelist channel and someone typed pure IGN:
+    if is_whitelist_channel:
+        clean_word = content.strip().replace('"', '').replace("'", "").replace("`", "")
+        if (
+            re.match(r'^[a-zA-Z0-9_.*]{3,20}$', clean_word)
+            and not any(w in clean_word.lower() for w in ["hi", "hey", "hello", "tillu", "help", "kya", "kaise", "what", "bro", "bhai", "join"])
+        ):
+            try:
+                await handle_whitelist_request(message, clean_word, user=message.author, guild=message.guild, bypass_cooldown=True)
+                return
+            except Exception as e:
+                logging.error(f"[Whitelist Channel IGN] Error: {e}")
+
+    # STRICT TRIGGER: If NOT addressed to Tillu, IGNORE COMPLETELY!
+    if not is_addressed_to_tillu:
+        return
+
+    # If an image was attached and Tillu is addressed, analyze with Pollinations Vision
+    if has_image:
         image_descs = []
         for att in message.attachments[:2]:
             is_img = (att.content_type and att.content_type.startswith("image/")) or any(
@@ -2537,7 +2707,7 @@ async def on_message(message: discord.Message):
 
     # ── CHECK DIRECT MEMORY COMMAND ("tillu yaad rakh <baat>", "remember <fact>") ──
     is_mem, mem_topic, mem_fact = extract_memory_request(content)
-    if is_mem and (match_tillu or is_mentioned or is_reply_to_bot or is_active_session):
+    if is_mem:
         if author_is_owner or is_privileged_user(author, message.guild):
             clean_top, clean_cont, over = memory_mgr.add_or_update(
                 mem_topic, mem_fact, author=f"{author.name} (Owner)" if author_is_owner else f"{author.name} (Staff)"
@@ -2559,69 +2729,19 @@ async def on_message(message: discord.Message):
             await message.channel.send(f"📩 **Aapki request bhej di gayi hai!**\nAapki memory (*\"{mem_fact}\"*) maine review ke liye bhej di hai. Unke approve karte hi main isse yaad rakh lunga! 😄")
             return
 
-    if is_whitelist_channel:
-        clean_word = content.strip().replace('"', '').replace("'", "").replace("`", "")
-        # If user just typed an IGN directly (e.g. "Notch", "Steve_123", ".BedrockUser")
-        if (
-            re.match(r'^[a-zA-Z0-9_.*]{3,20}$', clean_word)
-            and not any(w in clean_word.lower() for w in ["hi", "hey", "hello", "tillu", "help", "kya", "kaise", "what", "bro", "bhai", "join"])
-        ):
-            try:
-                await handle_whitelist_request(message, clean_word, user=message.author, guild=message.guild, bypass_cooldown=True)
-                return
-            except Exception as e:
-                logging.error(f"[Whitelist Channel IGN] Error: {e}")
-
-        # Otherwise process naturally through Tillu AI with zero cooldown
-        try:
-            async with message.channel.typing():
-                await handle_ask_request(message, content, user=message.author, guild=message.guild, bypass_cooldown=True)
-            return
-        except Exception as e:
-            logging.error(f"[Whitelist Channel Query] Error: {e}")
-
-    # CASE A: Explicit wake-up or message directed at Tillu (only respond when addressed)
-    if is_mentioned or is_reply_to_bot or match_tillu:
-        if is_dismissal:
-            ACTIVE_USER_CONVERSATIONS.pop(session_key, None)
-        else:
-            ACTIVE_USER_CONVERSATIONS[session_key] = now
-
-        # Clean query text
+    # Clean query text
+    query = content
+    if bot.user:
+        query = re.sub(rf'<@!?{bot.user.id}>', '', query).strip()
+    query = re.sub(r'^(hey\s+|yo\s+|hello\s+|hi\s+|arre\s+)?(mr\s*tillu|tillu)[\s,:]*', '', query, flags=re.IGNORECASE).strip()
+    if not query:
         query = content
-        if bot.user:
-            query = re.sub(rf'<@!?{bot.user.id}>', '', query).strip()
-        query = re.sub(r'^(hey\s+|yo\s+|hello\s+|hi\s+|arre\s+)?(mr\s*tillu|tillu)[\s,:]*', '', query, flags=re.IGNORECASE).strip()
-        if not query:
-            query = content
 
-        try:
-            async with message.channel.typing():
-                await handle_ask_request(message, query, user=message.author, guild=message.guild, bypass_cooldown=True)
-        except Exception as e:
-            logging.error(f"[on_message] Error handling natural query for Tillu: {e}")
-
-    # CASE B: Active conversation session (user asks follow-up questions without mentioning Tillu)
-    elif is_active_session:
-        # Ignore if user is replying to someone else or mentioning another user
-        has_other_mentions = any(m.id != (bot.user.id if bot.user else 0) for m in message.mentions)
-        if is_reply_to_other or has_other_mentions:
-            return
-
-        # Ignore bot prefix commands meant for other bots
-        if content.startswith(('!', '/', '.', '?', '-', '$', ';;', '>', ';', '~', '+', '=')):
-            return
-
-        if is_dismissal:
-            ACTIVE_USER_CONVERSATIONS.pop(session_key, None)
-        else:
-            ACTIVE_USER_CONVERSATIONS[session_key] = now
-
-        try:
-            async with message.channel.typing():
-                await handle_ask_request(message, content, user=message.author, guild=message.guild, bypass_cooldown=True)
-        except Exception as e:
-            logging.error(f"[on_message] Error handling active session follow-up for Tillu: {e}")
+    try:
+        async with message.channel.typing():
+            await handle_ask_request(message, query, user=message.author, guild=message.guild, bypass_cooldown=True)
+    except Exception as e:
+        logging.error(f"[on_message] Error handling query for Tillu: {e}")
 
 @bot.event
 async def on_interaction(interaction: discord.Interaction):
