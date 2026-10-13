@@ -32,6 +32,14 @@ Return ONLY valid JSON. No explanation. Possible actions:
 {"action": "unlock_channel", "channel_name": "<current or name>"}
 {"action": "restrict_posting", "channel_name": "<name>", "allowed_roles": ["moderator","admin"]}
 {"action": "rename_channel", "channel_name": "<old>", "new_name": "<new>"}
+{"action": "create_category", "category_name": "<name>"}
+{"action": "delete_category", "category_name": "<name>"}
+{"action": "move_channel_to_category", "channel": "<name>", "category": "<name>"}
+{"action": "group_channels", "category": "<name>", "keywords": ["<keyword1>", "<keyword2>"]}
+{"action": "add_bot", "bot": "<name or id>"}
+{"action": "lockdown_server"}
+{"action": "unlock_server"}
+{"action": "rename_server", "new_name": "<name>"}
 {"action": "timeout", "member": "<name>", "minutes": <number>}
 {"action": "backup_server"}
 {"action": "list_backups"}
@@ -44,6 +52,11 @@ Rules:
 - "restore channel <name>" → restore_section with section "channel" and target "<name>"
 - "restore role <name>" → restore_section with section "role" and target "<name>"
 - "make this role:- <name> with this features ..." -> extract role_name cleanly, and parse color, hoist, mentionable, permissions.
+- "create category X and move/group all Y stuff in it" → group_channels with category "X" and keywords ["Y"]
+- "group the X things all in one group named X" → group_channels with category "X" and keywords ["X"]
+- "add bot <name/id>" / "invite bot <name/id>" → add_bot with bot "<name/id>"
+- "lockdown server" → lockdown_server
+- "unlockdown server" → unlock_server
 
 - "hoist" means display separately in member list (true/false).
 - Colors: red, blue, green, yellow, orange, purple, pink, cyan, gold, dark_blue, dark_red, or hex like #ff0000.
@@ -298,6 +311,133 @@ def parse_role_features(data: dict = None, raw_text: str = "") -> Tuple[dict, li
 
     return kwargs, details
 
+KNOWN_BOTS = {
+    "carl": ("Carl-bot", "235148963503957990"),
+    "carl-bot": ("Carl-bot", "235148963503957990"),
+    "carlbot": ("Carl-bot", "235148963503957990"),
+    "dyno": ("Dyno", "155149108183695360"),
+    "mee6": ("MEE6", "159985870458322944"),
+    "probot": ("ProBot", "282859044593598464"),
+    "ticket tool": ("Ticket Tool", "557628352828014614"),
+    "tickettool": ("Ticket Tool", "557628352828014614"),
+    "ticket": ("Ticket Tool", "557628352828014614"),
+    "disboard": ("DISBOARD", "302050872383242240"),
+    "jockie music": ("Jockie Music", "411916947773587456"),
+    "jockie": ("Jockie Music", "411916947773587456"),
+    "rythm": ("Rythm", "235088799074484224"),
+    "fredboat": ("FredBoat", "184405253096439808"),
+    "yagpdb": ("YAGPDB.xyz", "204255221017214977"),
+    "arcane": ("Arcane", "437808476106784770"),
+    "tupperbox": ("Tupperbox", "431548175489531905"),
+    "server stats": ("Server Stats", "458276815090384906"),
+    "serverstats": ("Server Stats", "458276815090384906"),
+    "dank memer": ("Dank Memer", "270904126974590976"),
+    "dankmemer": ("Dank Memer", "270904126974590976"),
+    "mudae": ("Mudae", "432610292342587392"),
+    "loritta": ("Loritta", "297153970613387264"),
+    "owo": ("OwO", "408785106942164992"),
+    "hydra": ("Hydra", "547905866255433758"),
+    "chip": ("Chip", "614247895048257536"),
+    "groovy": ("Groovy", "234395307759108106"),
+    "apollo": ("Apollo", "475744554910351370"),
+    "suggestion": ("SuggestionBot", "493922624467599360"),
+}
+
+CAT_PATTERN = r'(?:cat[oeaiu]+g[oeaiu]+r[yei]+|group)'
+
+def find_category_fuzzy(guild: discord.Guild, query: str) -> Optional[discord.CategoryChannel]:
+    clean_q = re.sub(r'[^a-zA-Z0-9]', '', query).lower()
+    for cat in guild.categories:
+        if cat.name.lower() == query.lower() or re.sub(r'[^a-zA-Z0-9]', '', cat.name).lower() == clean_q:
+            return cat
+    for cat in guild.categories:
+        c_alnum = re.sub(r'[^a-zA-Z0-9]', '', cat.name).lower()
+        if clean_q and (clean_q in c_alnum or c_alnum in clean_q):
+            return cat
+    return None
+
+def handle_add_bot_action(guild: discord.Guild, author: discord.Member, query: str) -> Tuple[Optional[discord.Embed], Optional[discord.ui.View], Optional[str]]:
+    """Generate secure 1-click OAuth2 invite link to add any bot to the server (Moderator+ only)."""
+    clean_q = query.lower().strip()
+    clean_q = re.sub(r'^(?:add\s+bot|invite\s+bot|bot)\s*', '', clean_q).strip()
+    clean_q = re.sub(r'\s+(?:to|in|into)\s+(?:this\s+)?(?:server|discord).*', '', clean_q).strip()
+
+    id_match = re.search(r'\b(\d{17,20})\b', clean_q)
+    bot_id = id_match.group(1) if id_match else None
+    bot_name = f"Bot ({bot_id})" if bot_id else clean_q.title()
+
+    if not bot_id:
+        for k_alias, (k_name, k_id) in KNOWN_BOTS.items():
+            if clean_q == k_alias or clean_q in k_alias or k_alias in clean_q:
+                bot_name = k_name
+                bot_id = k_id
+                break
+
+    if not bot_id:
+        return None, None, f"🔍 `{query}` known bots directory me nahi mila!\nBolo: `tillu add bot <Application_ID>` ya direct Application ID provide karo (e.g. Carl-bot, MEE6, Dyno, ProBot, Ticket Tool, Disboard, etc.). [Top.gg Directory](https://top.gg) se bhi ID le sakte hain."
+
+    invite_url = f"https://discord.com/oauth2/authorize?client_id={bot_id}&scope=bot%20applications.commands&permissions=8"
+
+    embed = discord.Embed(
+        title=f"🤖 Add {bot_name} to {guild.name}",
+        description=(
+            f"**Application ID:** `{bot_id}`\n"
+            f"**Requested By:** {author.mention}\n"
+            f"**Permissions:** `Administrator (Recommended for full features)`\n\n"
+            f"👉 Neeche diye gaye button par click karke bot ko server me authorize aur add kar lo!"
+        ),
+        color=0x5865F2,
+        timestamp=discord.utils.utcnow()
+    )
+    embed.set_footer(text="Tillu Bot Manager • OAuth2 Secure Gateway")
+
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(label=f"➕ Add {bot_name} to Server", url=invite_url, style=discord.ButtonStyle.link))
+    return embed, view, None
+
+async def group_channels_into_category(guild: discord.Guild, cat_name: str, keywords: list[str], author: discord.Member) -> Tuple[bool, str]:
+    """Find or create category and group matching channels into it."""
+    cat_clean = cat_name.strip().strip('"\'')
+    if not cat_clean:
+        cat_clean = "Grouped Channels"
+
+    target_cat = find_category_fuzzy(guild, cat_clean)
+    if not target_cat:
+        try:
+            target_cat = await guild.create_category(name=cat_clean.title(), reason=f"Created by Tillu via {author.name}")
+        except Exception as e:
+            return True, f"⚠️ Category create error: {e}"
+
+    clean_kws = [k.lower().strip() for k in keywords if k.strip()]
+    if not clean_kws:
+        clean_kws = [cat_clean.lower()]
+
+    matching_channels = []
+    for ch in guild.channels:
+        if isinstance(ch, discord.CategoryChannel):
+            continue
+        if ch.category_id == target_cat.id:
+            continue
+        ch_norm = ch.name.lower().replace('-', ' ').replace('_', ' ')
+        if any(kw in ch_norm or kw in ch.name.lower() for kw in clean_kws):
+            matching_channels.append(ch)
+
+    if not matching_channels:
+        return True, f"📂 Category **{target_cat.name}** ready hai, lekin server me koi aisa channel nahi mila jisme `{', '.join(clean_kws)}` ho!"
+
+    moved = []
+    errors = []
+    for ch in matching_channels:
+        try:
+            await ch.edit(category=target_cat, reason=f"Grouped into {target_cat.name} by Tillu via {author.name}")
+            moved.append(ch.mention)
+        except Exception as ex:
+            errors.append(f"{ch.name} ({ex})")
+
+    resp = f"📂 **Done Boss!** Category **{target_cat.name}** me `{len(moved)}` channels group/move kar diye gaye:\n" + ", ".join(moved)
+    if errors:
+        resp += f"\n*(Error moving: {', '.join(errors)})*"
+    return True, resp
 
 async def parse_and_execute_discord_action(
     message: discord.Message,
@@ -318,8 +458,10 @@ async def parse_and_execute_discord_action(
     # ── FAST BAILOUT: Skip immediately for normal conversation (0ms overhead) ──
     MGMT_KEYWORDS = [
         "role", "channel", "delete", "purge", "clear", "remove", "saaf", "hata", "mute", "timeout",
-        "lock", "unlock", "slowmode", "topic", "rename", "category", "clone", "clip", "post in",
-        "permission", "creators", "admin", "backup", "restore", "snapshot", "sync", "claim", "drop"
+        "lock", "unlock", "slowmode", "topic", "rename", "category", "catogery", "catagory", "catagery",
+        "clone", "clip", "post in", "permission", "creators", "admin", "backup", "restore", "snapshot",
+        "sync", "claim", "drop", "group", "move", "shift", "bot", "add bot", "invite", "lockdown",
+        "server", "transfer", "put"
     ]
     if not any(kw in clean_text for kw in MGMT_KEYWORDS):
         return False, None
@@ -791,15 +933,162 @@ async def parse_and_execute_discord_action(
         except Exception as e:
             return True, f"⚠️ Unhide channel error: {e}"
 
-    # 14. CREATE CATEGORY
-    cat_match = re.search(r'create\s+category\s+["\']?([^"\']+)["\']?', clean_text)
-    if cat_match:
-        cat_name = cat_match.group(1).strip()
+    # 14. ADD / INVITE BOT TO SERVER (Moderators & Above)
+    # e.g., "tillu add bot Carl-bot", "invite bot 235148963503957990", "add bot mee6"
+    add_bot_match = re.search(r'(?:add|invite)\s+bot\s+(.+)', clean_text)
+    if add_bot_match:
+        is_mod = (
+            author.guild_permissions.manage_guild
+            or author.guild_permissions.administrator
+            or guild.owner_id == author.id
+            or any(r.name.lower() in ['mod', 'moderator', 'admin', 'administrator', 'owner', 'staff'] for r in author.roles)
+        )
+        if not is_mod:
+            return True, "🚫 **Permission Denied!** Sirf Server Owner, Administrators aur Moderators hi server me naye bots invite/add kar sakte hain!"
+
+        bot_q = add_bot_match.group(1).strip()
+        embed, view, msg = handle_add_bot_action(guild, author, bot_q)
+        if embed:
+            await message.channel.send(embed=embed, view=view)
+            return True, None
+        return True, msg
+
+    # 15. CATEGORY & CHANNEL GROUPING MANAGEMENT
+    # 15.1 Combined: "create category tillu and move all tillu related stuff like memory test and all in that"
+    cat_create_and_move = re.search(
+        rf'(?:create|make)\s+(?:a\s+)?(?:new\s+)?{CAT_PATTERN}\s+(?:named?\s*[:\-]*\s*|called?\s*[:\-]*\s*)?["\']?([a-zA-Z0-9_\- ]+?)["\']?\s+and\s+(?:move|group|put|shift)\s+(?:all\s+)?(.+?)\s+(?:in|into)\s+(?:that|it|category)',
+        clean_text
+    )
+    if cat_create_and_move:
+        cat_name = cat_create_and_move.group(1).strip()
+        raw_filter = cat_create_and_move.group(2).strip()
+        kws = set([cat_name.lower()])
+        like_m = re.search(r'like\s+([^,]+)', raw_filter)
+        if like_m:
+            words = [w.strip() for w in re.split(r'[, ]+', like_m.group(1)) if w.strip() and w not in ["and", "all", "in", "that", "the", "stuff", "channels"]]
+            kws.update(words)
+        rel_m = re.search(r'([a-zA-Z0-9_\-]+)\s+related', raw_filter)
+        if rel_m:
+            kws.add(rel_m.group(1).strip())
+        success, msg = await group_channels_into_category(guild, cat_name, list(kws), author)
+        return True, msg
+
+    # 15.2 Group: "group the tillu things all in one group named tillu"
+    cat_group_things = re.search(
+        rf'group\s+(?:all\s+)?(?:the\s+)?([a-zA-Z0-9_\-]+)\s+(?:things|channels?|stuff)\s+(?:all\s+in\s+one\s+group\s+named|into|in)\s+(?:{CAT_PATTERN}\s+)?["\']?([a-zA-Z0-9_\- ]+?)["\']?',
+        clean_text
+    )
+    if cat_group_things:
+        kw = cat_group_things.group(1).strip()
+        cat_name = cat_group_things.group(2).strip()
+        success, msg = await group_channels_into_category(guild, cat_name, [kw, cat_name], author)
+        return True, msg
+
+    # 15.3 Move all matching: "group all tillu stuff in tillu category" / "move all memory channels to category archive"
+    cat_move_all = re.search(
+        rf'(?:group|move|shift)\s+(?:all\s+)?([a-zA-Z0-9_\-]+)\s+(?:related\s+)?(?:things|stuff|channels?)\s+(?:in|into|to)\s+(?:{CAT_PATTERN}\s+)?["\']?([a-zA-Z0-9_\- ]+?)["\']?',
+        clean_text
+    )
+    if cat_move_all and not re.search(r'^(?:move|shift)\s+(?:channel\s+)?<#\d+>', clean_text):
+        kw = cat_move_all.group(1).strip()
+        cat_name = cat_move_all.group(2).strip()
+        success, msg = await group_channels_into_category(guild, cat_name, [kw, cat_name], author)
+        return True, msg
+
+    # 15.4 Move single channel to category: "move channel #rules to category Information"
+    move_single_ch = re.search(
+        rf'(?:move|shift)\s+(?:channel\s+)?(?:<#(\d+)>|#?([a-zA-Z0-9_\-]+))\s+(?:to|in|into)\s+(?:{CAT_PATTERN}\s+)?["\']?([a-zA-Z0-9_\- ]+?)["\']?',
+        clean_text
+    )
+    if move_single_ch:
+        ch_id = move_single_ch.group(1)
+        ch_name = move_single_ch.group(2)
+        cat_query = move_single_ch.group(3).strip()
+
+        target_ch = guild.get_channel(int(ch_id)) if ch_id else None
+        if not target_ch and ch_name:
+            target_ch = discord.utils.find(lambda c: c.name.lower() == ch_name.lower(), guild.channels)
+
+        if not target_ch:
+            return True, f"❌ Channel `{ch_name or ch_id}` nahi mila!"
+
+        target_cat = find_category_fuzzy(guild, cat_query)
+        if not target_cat:
+            try:
+                target_cat = await guild.create_category(name=cat_query.title(), reason=f"Created by Tillu via {author.name}")
+            except Exception as ce:
+                return True, f"⚠️ Category create error: {ce}"
+
         try:
-            new_cat = await guild.create_category(name=cat_name, reason=f"Created by Tillu via {author.name}")
+            await target_ch.edit(category=target_cat, reason=f"Moved by Tillu via {author.name}")
+            return True, f"📂 **Channel Moved!** {target_ch.mention} ab category **{target_cat.name}** me shift ho gaya hai! ✅"
+        except Exception as e:
+            return True, f"⚠️ Channel move error: {e}"
+
+    # 15.5 Delete Category: "delete category old-archive"
+    del_cat_match = re.search(rf'(?:delete|remove|hata\s+do)\s+{CAT_PATTERN}\s+["\']?([^"\'\n:]+?)["\']?$', clean_text)
+    if del_cat_match:
+        cat_q = del_cat_match.group(1).strip()
+        cat = find_category_fuzzy(guild, cat_q)
+        if not cat:
+            return True, f"❌ Category `{cat_q}` nahi mila!"
+        try:
+            c_name = cat.name
+            await cat.delete(reason=f"Deleted by Tillu via {author.name}")
+            return True, f"🗑️ **Category Deleted!** Category `{c_name}` delete kar diya gaya hai (channels safe hain)."
+        except Exception as e:
+            return True, f"⚠️ Category delete error: {e}"
+
+    # 15.6 Standalone Create Category: "create category Staff Only"
+    create_cat_match = re.search(rf'(?:create|make|bana(?:\s+do)?)\s+(?:a\s+)?(?:new\s+)?{CAT_PATTERN}\s*(?:named?\s*[:\-]*\s*|called?\s*[:\-]*\s*)?["\']?([^"\'\n:]+?)["\']?$', clean_text)
+    if create_cat_match:
+        cat_name = create_cat_match.group(1).strip()
+        existing = find_category_fuzzy(guild, cat_name)
+        if existing:
+            return True, f"ℹ️ Category `{existing.name}` pehle se exist karta hai!"
+        try:
+            new_cat = await guild.create_category(name=cat_name.title(), reason=f"Created by Tillu via {author.name}")
             return True, f"📂 **Category Created!** Nayi category `{new_cat.name}` ban gayi hai!"
         except Exception as e:
             return True, f"⚠️ Category create error: {e}"
+
+    # 15.7 SERVER LOCKDOWN & UNLOCKDOWN
+    if any(p in clean_text for p in ["lockdown server", "server lockdown", "lock the server", "lock down server"]):
+        if not (author.guild_permissions.administrator or guild.owner_id == author.id):
+            return True, "🚫 Sirf Server Owner ya Administrators hi poora server lockdown kar sakte hain!"
+        locked_cnt = 0
+        for ch in guild.text_channels:
+            try:
+                await ch.set_permissions(guild.default_role, send_messages=False, reason=f"Server Lockdown by Tillu via {author.name}")
+                locked_cnt += 1
+            except Exception:
+                pass
+        return True, f"🚨 **SERVER LOCKDOWN ACTIVE!** `{locked_cnt}` text channels me @everyone ka send permission block kar diya gaya hai!"
+
+    if any(p in clean_text for p in ["unlockdown server", "server unlockdown", "unlock the server", "lift lockdown"]):
+        if not (author.guild_permissions.administrator or guild.owner_id == author.id):
+            return True, "🚫 Sirf Server Owner ya Administrators hi server lockdown hata sakte hain!"
+        unlocked_cnt = 0
+        for ch in guild.text_channels:
+            try:
+                await ch.set_permissions(guild.default_role, send_messages=True, reason=f"Server Lockdown lifted by Tillu via {author.name}")
+                unlocked_cnt += 1
+            except Exception:
+                pass
+        return True, f"🟢 **SERVER LOCKDOWN LIFTED!** `{unlocked_cnt}` channels me send permission restore kar diya gaya hai!"
+
+    # 15.8 RENAME SERVER
+    rename_srv_match = re.search(r'(?:rename|change\s+name\s+of)\s+server\s+(?:to\s+)?["\']?([^"\']+)["\']?', clean_text)
+    if rename_srv_match:
+        if not (author.guild_permissions.manage_guild or author.guild_permissions.administrator or guild.owner_id == author.id):
+            return True, "🚫 Sirf Server Owner ya Administrators hi server rename kar sakte hain!"
+        new_sname = rename_srv_match.group(1).strip()
+        try:
+            old_sname = guild.name
+            await guild.edit(name=new_sname, reason=f"Renamed by Tillu via {author.name}")
+            return True, f"👑 **Server Renamed!** Server ka naam `{old_sname}` se badal kar `{new_sname}` kar diya gaya hai!"
+        except Exception as e:
+            return True, f"⚠️ Server rename error: {e}"
 
     # 15. CLONE CHANNEL
     if "clone" in clean_text and "channel" in clean_text:
@@ -1087,6 +1376,103 @@ async def parse_and_execute_discord_action(
         target = ai_result.get("target") or ""
         success, msg = await backup_manager.restore_section(guild, section, specific_target=target)
         return True, msg
+
+    elif ai_action == "create_category":
+        cat_name = ai_result.get("category_name", "").strip()
+        if not cat_name:
+            return False, None
+        existing = find_category_fuzzy(guild, cat_name)
+        if existing:
+            return True, f"ℹ️ Category `{existing.name}` pehle se exist karta hai!"
+        try:
+            new_cat = await guild.create_category(name=cat_name.title(), reason=f"Created by Tillu via {author.name}")
+            return True, f"📂 **Category Created!** Nayi category `{new_cat.name}` ban gayi hai!"
+        except Exception as e:
+            return True, f"⚠️ Category create error: {e}"
+
+    elif ai_action == "delete_category":
+        cat_name = ai_result.get("category_name", "").strip()
+        cat = find_category_fuzzy(guild, cat_name)
+        if not cat:
+            return True, f"❌ Category `{cat_name}` nahi mila!"
+        try:
+            c_name = cat.name
+            await cat.delete(reason=f"Deleted by Tillu via {author.name}")
+            return True, f"🗑️ **Category Deleted!** Category `{c_name}` delete kar diya gaya hai."
+        except Exception as e:
+            return True, f"⚠️ Category delete error: {e}"
+
+    elif ai_action == "move_channel_to_category":
+        ch_q = ai_result.get("channel", "")
+        cat_q = ai_result.get("category", "")
+        target_ch = discord.utils.find(lambda c: ch_q.lower() in c.name.lower(), guild.channels)
+        if not target_ch:
+            return True, f"❌ Channel `{ch_q}` nahi mila!"
+        target_cat = find_category_fuzzy(guild, cat_q)
+        if not target_cat:
+            target_cat = await guild.create_category(name=cat_q.title(), reason=f"Created by Tillu via {author.name}")
+        try:
+            await target_ch.edit(category=target_cat, reason=f"Moved by Tillu via {author.name}")
+            return True, f"📂 **Channel Moved!** {target_ch.mention} ab category **{target_cat.name}** me shift ho gaya hai!"
+        except Exception as e:
+            return True, f"⚠️ Channel move error: {e}"
+
+    elif ai_action == "group_channels":
+        cat_name = ai_result.get("category", "Grouped Channels")
+        kws = ai_result.get("keywords", [cat_name])
+        success, msg = await group_channels_into_category(guild, cat_name, kws, author)
+        return True, msg
+
+    elif ai_action == "add_bot":
+        bot_q = ai_result.get("bot", "")
+        is_mod = (
+            author.guild_permissions.manage_guild
+            or author.guild_permissions.administrator
+            or guild.owner_id == author.id
+            or any(r.name.lower() in ['mod', 'moderator', 'admin', 'administrator', 'owner', 'staff'] for r in author.roles)
+        )
+        if not is_mod:
+            return True, "🚫 **Permission Denied!** Sirf Server Owner, Administrators aur Moderators hi bots add kar sakte hain!"
+        embed, view, msg = handle_add_bot_action(guild, author, bot_q)
+        if embed:
+            await message.channel.send(embed=embed, view=view)
+            return True, None
+        return True, msg
+
+    elif ai_action == "lockdown_server":
+        if not (author.guild_permissions.administrator or guild.owner_id == author.id):
+            return True, "🚫 Sirf Server Owner ya Administrators hi poora server lockdown kar sakte hain!"
+        locked_cnt = 0
+        for ch in guild.text_channels:
+            try:
+                await ch.set_permissions(guild.default_role, send_messages=False, reason=f"Server Lockdown by Tillu via {author.name}")
+                locked_cnt += 1
+            except Exception:
+                pass
+        return True, f"🚨 **SERVER LOCKDOWN ACTIVE!** `{locked_cnt}` text channels me send permission block ho gaya hai!"
+
+    elif ai_action == "unlock_server":
+        if not (author.guild_permissions.administrator or guild.owner_id == author.id):
+            return True, "🚫 Sirf Server Owner ya Administrators hi server lockdown hata sakte hain!"
+        unlocked_cnt = 0
+        for ch in guild.text_channels:
+            try:
+                await ch.set_permissions(guild.default_role, send_messages=True, reason=f"Server Lockdown lifted by Tillu via {author.name}")
+                unlocked_cnt += 1
+            except Exception:
+                pass
+        return True, f"🟢 **SERVER LOCKDOWN LIFTED!** `{unlocked_cnt}` channels me send permission restore kar diya gaya hai!"
+
+    elif ai_action == "rename_server":
+        if not (author.guild_permissions.manage_guild or author.guild_permissions.administrator or guild.owner_id == author.id):
+            return True, "🚫 Sirf Server Owner ya Administrators hi server rename kar sakte hain!"
+        new_sname = ai_result.get("new_name", "").strip()
+        try:
+            old_sname = guild.name
+            await guild.edit(name=new_sname, reason=f"Renamed by Tillu via {author.name}")
+            return True, f"👑 **Server Renamed!** Server ka naam `{old_sname}` → `{new_sname}` kar diya gaya!"
+        except Exception as e:
+            return True, f"⚠️ Server rename error: {e}"
 
     return False, None
 

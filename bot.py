@@ -2290,6 +2290,22 @@ async def cmd_players(ctx):
     """Check live online Minecraft players and roles directly from server console."""
     await handle_players_command(ctx.channel, ctx.author)
 
+@bot.command(name="addbot", aliases=["invitebot", "botinvite"])
+async def cmd_addbot(ctx, *, bot_query: str = None):
+    """Generate secure 1-click OAuth2 invite link to add any bot to the server (Moderator+ only)."""
+    if not is_privileged_user(ctx.author, ctx.guild):
+        await ctx.send("🚫 **Permission Denied!** Sirf Server Owner, Admins aur Moderators hi server me naye bots invite kar sakte hain!")
+        return
+    if not bot_query:
+        await ctx.send("❌ Usage: `!addbot <bot_name or bot_application_id>`\nPopular bots: `carl-bot`, `dyno`, `mee6`, `probot`, `ticket tool`, `disboard`, `jockie music`, `rythm`, etc.")
+        return
+    from discord_action_manager import handle_add_bot_action
+    embed, view, msg = handle_add_bot_action(ctx.guild, ctx.author, bot_query)
+    if embed:
+        await ctx.send(embed=embed, view=view)
+    else:
+        await ctx.send(msg)
+
 @bot.command(name="tillu", aliases=["ask", "ai", "question"])
 async def cmd_tillu(ctx, *, query: str = None):
     # Check for image attachments with !tillu
