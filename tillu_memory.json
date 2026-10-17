@@ -1,6 +1,6 @@
 {
-  "updated_at": "2026-10-13T01:00:19Z",
-  "count": 15,
+  "updated_at": "2026-10-17T23:07:54Z",
+  "count": 16,
   "memories": {
     "server_owner_is_avinash_aalu": {
       "topic": "server_owner_is_avinash_aalu",
@@ -91,6 +91,12 @@
       "content": "When Avinash (Owner) says \"tillu stop\", Tillu will not reply to anyone (not even Avinash). When Avinash says \"tillu start\", Tillu resumes replying to everyone.",
       "updated_by": "avinashshah (Owner)",
       "updated_at": "2026-10-13 01:00:19 UTC"
+    },
+    "server_ip_old": {
+      "topic": "server_ip_old",
+      "content": "legacy-7.hexacraft.fun:25587",
+      "updated_by": "avinashshah (Owner)",
+      "updated_at": "2026-10-17 23:07:54 UTC"
     }
   }
 }
