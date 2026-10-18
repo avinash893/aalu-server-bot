@@ -52,7 +52,14 @@ if os.path.exists(env_path):
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 SERVER_HOST = os.environ.get("SERVER_HOST", "legacy-7.hexacraft.fun")
-SERVER_PORT = int(os.environ.get("SERVER_PORT", "25587"))
+
+# Decouple Minecraft server port from Pterodactyl container allocation port (e.g. 19133)
+_raw_mc_port = os.environ.get("MC_SERVER_PORT") or os.environ.get("MINECRAFT_PORT")
+if _raw_mc_port:
+    SERVER_PORT = int(_raw_mc_port)
+else:
+    _env_p = os.environ.get("SERVER_PORT", "25587")
+    SERVER_PORT = 25587 if str(_env_p) in ("19133", "19132", "10000", "8080", "5000") else int(_env_p)
 
 PRIMARY_GUILD_ID = int(os.environ.get("PRIMARY_GUILD_ID", "1456298447979286541"))
 CS2_GUILD_ID = int(os.environ.get("CS2_GUILD_ID", "1530719250237362297"))
