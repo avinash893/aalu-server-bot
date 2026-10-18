@@ -467,39 +467,106 @@ async def parse_and_execute_discord_action(
         return False, None
 
     # ── HELPER: Fuzzy member finder ──────────────────────────────────────────
-    def find_member_fuzzy(query: str) -> discord.Member | None:
-        """Find member by mention, ID, exact name, nick, or partial name (case-insensitive)."""
-        if message.mentions:
-            return message.mentions[0]
+    async def find_member_fuzzy(query: str) -> discord.Member | None:
+        """Find member by mention, ID, exact name, nick, or partial name with async fetch fallback."""
+        if not query:
+            return None
+        my_id = guild.me.id if guild.me else (message._state.user.id if hasattr(message, "_state") else 0)
+
+        # 1. Mention in query (<@123...>)
+        m_id = re.search(r'<@!?(\d+)>', query)
+        if m_id:
+            uid = int(m_id.group(1))
+            mem = guild.get_member(uid)
+            if mem:
+                return mem
+            try:
+                return await guild.fetch_member(uid)
+            except Exception:
+                pass
+
+        # 2. Check message.mentions (excluding bot itself)
+        user_mentions = [m for m in message.mentions if m.id != my_id]
+        if user_mentions:
+            clean_q = re.sub(r'[^a-zA-Z0-9]', '', query).lower()
+            if not clean_q:
+                return user_mentions[0]
+            for m in user_mentions:
+                if str(m.id) == clean_q or clean_q in m.name.lower() or (m.nick and clean_q in m.nick.lower()):
+                    return m
+            if len(user_mentions) == 1:
+                return user_mentions[0]
+
+        # 3. Direct ID query
         clean_q = re.sub(r'[^a-zA-Z0-9]', '', query).lower()
-        # Exact match first
+        if not clean_q:
+            return None
+        if clean_q.isdigit():
+            uid = int(clean_q)
+            mem = guild.get_member(uid)
+            if mem:
+                return mem
+            try:
+                return await guild.fetch_member(uid)
+            except Exception:
+                pass
+
+        # 4. Exact name / nick match in cached members
         for m in guild.members:
+            if m.id == my_id:
+                continue
             nm = re.sub(r'[^a-zA-Z0-9]', '', m.name).lower()
             nk = re.sub(r'[^a-zA-Z0-9]', '', m.nick or '').lower()
-            if str(m.id) == clean_q or nm == clean_q or nk == clean_q:
+            if nm == clean_q or nk == clean_q:
                 return m
-        # Partial match fallback
-        for m in guild.members:
-            nm = re.sub(r'[^a-zA-Z0-9]', '', m.name).lower()
-            nk = re.sub(r'[^a-zA-Z0-9]', '', m.nick or '').lower()
-            if clean_q in nm or clean_q in nk or nm in clean_q:
-                return m
+
+        # 5. Partial match fallback (length >= 3 to prevent false positives)
+        if len(clean_q) >= 3:
+            for m in guild.members:
+                if m.id == my_id:
+                    continue
+                nm = re.sub(r'[^a-zA-Z0-9]', '', m.name).lower()
+                nk = re.sub(r'[^a-zA-Z0-9]', '', m.nick or '').lower()
+                if clean_q in nm or (nk and clean_q in nk):
+                    return m
         return None
 
     # ── HELPER: Fuzzy role finder ─────────────────────────────────────────────
     def find_role_fuzzy(query: str) -> discord.Role | None:
+        if not query:
+            return None
+        # Check role mention (<@&123456789>)
+        r_id_m = re.search(r'<@&(\d+)>', query)
+        if r_id_m:
+            r = guild.get_role(int(r_id_m.group(1)))
+            if r:
+                return r
+
         q = query.lower().strip()
         q_clean = re.sub(r'^(?:named?\s*[:\-]*\s*|role\s+)', '', q).strip()
         q_alnum = re.sub(r'[^a-zA-Z0-9]', '', q_clean)
+        if not q_alnum:
+            return None
+        # Check direct role ID
+        if q_alnum.isdigit():
+            r = guild.get_role(int(q_alnum))
+            if r:
+                return r
         # Exact name match
         for r in guild.roles:
             if r.name.lower() == q or r.name.lower() == q_clean:
                 return r
-        # Alphanumeric match (handles "Named:- Creators" matching "Creators")
+        # Alphanumeric match
         for r in guild.roles:
             r_alnum = re.sub(r'[^a-zA-Z0-9]', '', r.name).lower()
-            if q_alnum and (r_alnum == q_alnum or q_alnum in r_alnum or r_alnum in q_alnum):
+            if r_alnum == q_alnum:
                 return r
+        # Substring match (require len >= 3)
+        if len(q_alnum) >= 3:
+            for r in guild.roles:
+                r_alnum = re.sub(r'[^a-zA-Z0-9]', '', r.name).lower()
+                if q_alnum in r_alnum or (len(r_alnum) >= 4 and r_alnum in q_alnum):
+                    return r
         return None
 
     # ═════════════════════════════════════════════════════════════════════════
@@ -521,12 +588,18 @@ async def parse_and_execute_discord_action(
             return True, "📂 Abhi tak koi backup snapshot create nahi hua hai. `tillu backup server` se create karo!"
         return True, f"📂 **Available Backups:**\n" + "\n".join(f"• `{b}`" for b in b_list[:5])
 
-    restore_ch_m = re.search(r'restore\s+channel\s+(?:<#\d+>|#?([a-zA-Z0-9_\-]+))', clean_text)
+    restore_ch_m = re.search(r'restore\s+channel\s+(?:<#(\d+)>|#?([a-zA-Z0-9_\-]+))', clean_text)
     if restore_ch_m:
         if not (author.guild_permissions.administrator or guild.owner_id == author.id):
             return True, "🚫 Sirf Server Owner ya Administrators hi restore kar sakte hain!"
         import backup_manager
-        ch_target = restore_ch_m.group(1).strip()
+        ch_id = restore_ch_m.group(1)
+        ch_name = restore_ch_m.group(2)
+        if ch_id:
+            resolved_ch = guild.get_channel(int(ch_id))
+            ch_target = resolved_ch.name if resolved_ch else ch_id
+        else:
+            ch_target = (ch_name or "").strip()
         success, msg = await backup_manager.restore_section(guild, "channel", specific_target=ch_target)
         return True, msg
 
@@ -561,7 +634,7 @@ async def parse_and_execute_discord_action(
         reg_file = os.path.join(os.path.dirname(__file__), "whitelist_registry.json")
         if os.path.exists(reg_file):
             try:
-                with open(reg_file, "r", encoding="utf-8") as f:
+                with open(reg_file, "r", encoding="utf-8-sig") as f:
                     reg = json.load(f)
             except Exception:
                 pass
@@ -582,7 +655,7 @@ async def parse_and_execute_discord_action(
         reg = {}
         if os.path.exists(reg_file):
             try:
-                with open(reg_file, "r", encoding="utf-8") as f:
+                with open(reg_file, "r", encoding="utf-8-sig") as f:
                     reg = json.load(f)
             except Exception:
                 pass
@@ -592,13 +665,20 @@ async def parse_and_execute_discord_action(
         if not target_ign:
             return True, f"❌ {author.mention}, tumhara koi Minecraft account linked nahi hai! Bolo: `tillu send my claims to <account_name>` ya pehle `!whitelist <your_ign>` karo."
 
-        try:
-            import bot as _bot
-            cmd_fn = _bot.panel_send_command
-        except Exception:
+        import sys
+        _bot = sys.modules.get("bot") or sys.modules.get("__main__")
+        cmd_fn = getattr(_bot, "panel_send_command", None)
+        if not cmd_fn:
+            try:
+                import bot as _bot_mod
+                cmd_fn = getattr(_bot_mod, "panel_send_command", None)
+            except Exception:
+                pass
+        if not cmd_fn:
             cmd_fn = lambda c: (False, "Command function unavailable")
 
-        success, items, msg = rewards_manager.send_claims_to_account(author.id, target_ign, cmd_fn)
+        import asyncio
+        success, items, msg = await asyncio.to_thread(rewards_manager.send_claims_to_account, author.id, target_ign, cmd_fn)
         if not success:
             return True, f"{author.mention} {msg}"
 
@@ -637,14 +717,18 @@ async def parse_and_execute_discord_action(
         count = min(int(purge_match.group(1)), 100)
         target_ch = message.channel
         # Check if another channel mentioned by name
-        for ch in guild.channels:
-            if isinstance(ch, discord.TextChannel) and ch.name.lower() in clean_text and ch != message.channel:
-                target_ch = ch
-                break
+        # Check channel mentions first
+        if message.channel_mentions:
+            target_ch = message.channel_mentions[0]
+        else:
+            for ch in guild.channels:
+                if isinstance(ch, discord.TextChannel) and len(ch.name) >= 3 and re.search(rf'\b{re.escape(ch.name.lower())}\b', clean_text) and ch != message.channel:
+                    target_ch = ch
+                    break
         try:
             bot_only = any(w in clean_text for w in ["your", "tillu", "apne", "khud ke"])
             if bot_only:
-                my_id = guild.me.id if guild.me else message.author.id
+                my_id = guild.me.id if guild.me else (message._state.user.id if hasattr(message, "_state") else message.author.id)
                 deleted = await target_ch.purge(limit=min(count * 5, 100), check=lambda m: m.author.id == my_id)
             else:
                 deleted = await target_ch.purge(limit=count + 1)
@@ -658,7 +742,6 @@ async def parse_and_execute_discord_action(
             return True, None
         except Exception as e:
             err = f"⚠️ Messages delete karne me error aaya: {e}"
-            await message.channel.send(err)
             return True, err
 
     # 2. DELETE / REMOVE ROLE FROM SERVER
@@ -667,8 +750,9 @@ async def parse_and_execute_discord_action(
         r'(?:delete|remove|hata\s+do)\s+(?:the\s+)?role\s+(?:named?\s*[:\-]*\s*|called?\s*[:\-]*\s*)?["\']?([^"\']+)["\']?(?:\s+from\s+(?:discord|server))?',
         clean_text
     )
-    if del_role_match and not re.search(r'\bfrom\s+(?:<@|\b[a-zA-Z0-9_]{3,}\b)', clean_text):
+    if del_role_match and not re.search(r'\bfrom\s+(?!discord\b|server\b|guild\b)(?:<@|\b[a-zA-Z0-9_]{3,}\b)', clean_text):
         role_q = del_role_match.group(1).strip()
+        role_q = re.sub(r'\s+from\s+(?:discord|server|guild)\s*$', '', role_q).strip()
         role = find_role_fuzzy(role_q)
         if role:
             try:
@@ -695,6 +779,9 @@ async def parse_and_execute_discord_action(
             return True, f"ℹ️ Role `{existing.name}` pehle se exist karta hai! Use karna ho to assign karo."
         try:
             role_kwargs, feat_details = parse_role_features(raw_text=features_str or text)
+            if role_kwargs.get("permissions") and role_kwargs["permissions"].administrator:
+                if not (author.guild_permissions.administrator or guild.owner_id == author.id):
+                    return True, "🚫 Sirf Server Owner ya Administrators hi Administrator permissions wala role bana sakte hain!"
             new_role = await guild.create_role(
                 name=role_name,
                 reason=f"Created by Tillu via {author.name}",
@@ -709,7 +796,7 @@ async def parse_and_execute_discord_action(
     # 4. GIVE / ADD ROLE (also handles: "create role X and add Y to it")
     # e.g., "tillu give role VIP to @user", "create role Creators and add uniqueumar to it"
     add_role_match = re.search(
-        r'(?:give|add|assign|de\s+do)\s+(?:role\s+)?["\']?([^"\'@<>\n]+?)["\']?\s+(?:role\s+)?to\s+(.+)',
+        r'(?:give|add|assign|de\s+do)\s+(?:role\s+)?(?:<@&(\d+)>|["\']?([^"\'\n]+?)["\']?)\s+(?:role\s+)?to\s+(.+)',
         text,
         re.IGNORECASE
     )
@@ -719,12 +806,16 @@ async def parse_and_execute_discord_action(
         text,
         re.IGNORECASE | re.DOTALL
     )
-    if compound_match:
-        add_role_match = compound_match
 
-    if add_role_match:
-        role_query = add_role_match.group(1).strip()
-        target_query = add_role_match.group(2).strip()
+    if add_role_match or compound_match:
+        if compound_match:
+            role_query = compound_match.group(1).strip()
+            target_query = compound_match.group(2).strip()
+        else:
+            role_id = add_role_match.group(1)
+            role_name_raw = add_role_match.group(2)
+            role_query = role_id or (role_name_raw or "").strip()
+            target_query = add_role_match.group(3).strip()
 
         # Find or create role
         role = find_role_fuzzy(role_query) or find_role_fuzzy(role_query.title())
@@ -739,7 +830,7 @@ async def parse_and_execute_discord_action(
                 return True, f"❌ Role `{role_query}` create nahi hua: {re_err}"
 
         # Find member (fuzzy)
-        target_member = find_member_fuzzy(target_query)
+        target_member = await find_member_fuzzy(target_query)
         if not target_member:
             return True, f"❌ Member `{target_query}` nahi mila! @mention karke try karo."
 
@@ -752,19 +843,21 @@ async def parse_and_execute_discord_action(
     # 5. REMOVE ROLE FROM MEMBER
     # e.g., "tillu remove role VIP from @user"
     rem_role_match = re.search(
-        r'(?:remove|take|hata\s+do)\s+role\s+["\']?([^"\']+)["\']?\s+from\s+(.+)',
+        r'(?:remove|take|hata\s+do)\s+(?:role\s+)?(?:<@&(\d+)>|["\']?([^"\'\n]+?)["\']?)\s+from\s+(.+)',
         text,
         re.IGNORECASE
     )
     if rem_role_match:
-        role_query = rem_role_match.group(1).strip()
-        target_query = rem_role_match.group(2).strip()
+        role_id = rem_role_match.group(1)
+        role_name_raw = rem_role_match.group(2)
+        role_query = role_id or (role_name_raw or "").strip()
+        target_query = rem_role_match.group(3).strip()
 
-        target_member = find_member_fuzzy(target_query)
+        target_member = await find_member_fuzzy(target_query)
         if not target_member:
             return True, f"❌ Member `{target_query}` nahi mila!"
 
-        role = discord.utils.find(lambda r: r.name.lower() == role_query.lower(), guild.roles)
+        role = find_role_fuzzy(role_query)
         if not role:
             return True, f"❌ Role `{role_query}` nahi mila!"
 
@@ -1182,7 +1275,7 @@ async def parse_and_execute_discord_action(
         msg = f"🎭 **Role Created!** `{existing.name}` ban gaya!{feat_msg}"
         if ai_action == "create_and_assign_role":
             member_q = ai_result.get("member", "")
-            target = find_member_fuzzy(member_q)
+            target = await find_member_fuzzy(member_q)
             if target:
                 try:
                     await target.add_roles(existing, reason=f"Assigned by Tillu via {author.name}")
@@ -1207,7 +1300,7 @@ async def parse_and_execute_discord_action(
                 )
             except Exception as e:
                 return True, f"⚠️ Role nahi mila aur create nahi hua: {e}"
-        target = find_member_fuzzy(member_q)
+        target = await find_member_fuzzy(member_q)
         if not target:
             return True, f"❌ Member `{member_q}` nahi mila! @mention karke try karo."
         try:
@@ -1233,7 +1326,7 @@ async def parse_and_execute_discord_action(
         role = find_role_fuzzy(role_name)
         if not role:
             return True, f"❌ Role `{role_name}` nahi mila!"
-        target = find_member_fuzzy(member_q)
+        target = await find_member_fuzzy(member_q)
         if not target:
             return True, f"❌ Member `{member_q}` nahi mila!"
         try:
@@ -1344,7 +1437,7 @@ async def parse_and_execute_discord_action(
     elif ai_action == "timeout":
         member_q = ai_result.get("member", "")
         mins = int(ai_result.get("minutes", 10))
-        target = find_member_fuzzy(member_q)
+        target = await find_member_fuzzy(member_q)
         if not target:
             return True, f"❌ Member `{member_q}` nahi mila!"
         try:
@@ -1405,7 +1498,14 @@ async def parse_and_execute_discord_action(
     elif ai_action == "move_channel_to_category":
         ch_q = ai_result.get("channel", "")
         cat_q = ai_result.get("category", "")
-        target_ch = discord.utils.find(lambda c: ch_q.lower() in c.name.lower(), guild.channels)
+        ch_id_m = re.search(r'\d{15,22}', str(ch_q))
+        if ch_id_m:
+            target_ch = guild.get_channel(int(ch_id_m.group(0)))
+        else:
+            clean_ch = str(ch_q).lower().strip().lstrip("#")
+            target_ch = discord.utils.find(lambda c: c.name.lower() == clean_ch, guild.channels) or (
+                discord.utils.find(lambda c: clean_ch in c.name.lower(), guild.channels) if len(clean_ch) >= 3 else None
+            )
         if not target_ch:
             return True, f"❌ Channel `{ch_q}` nahi mila!"
         target_cat = find_category_fuzzy(guild, cat_q)

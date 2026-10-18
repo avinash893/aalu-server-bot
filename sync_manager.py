@@ -65,12 +65,22 @@ async def sync_guild_roles(guild: discord.Guild, registry: dict) -> Tuple[int, i
     Scan all members and sync Whitelisted roles for registered Minecraft players.
     Returns (total_checked, total_assigned).
     """
+    if guild.me and not guild.me.guild_permissions.manage_roles:
+        logger.warning(f"Bot lacks manage_roles permission in {guild.name}; cannot sync whitelist roles.")
+        return 0, 0
+
     role = await get_or_create_whitelist_role(guild)
     if not role:
         return 0, 0
 
     assigned = 0
     checked = 0
+
+    if not getattr(guild, "chunked", True):
+        try:
+            await guild.chunk()
+        except Exception:
+            pass
 
     for user_id_str, data in registry.items():
         try:
@@ -79,6 +89,13 @@ async def sync_guild_roles(guild: discord.Guild, registry: dict) -> Tuple[int, i
             continue
 
         member = guild.get_member(uid)
+        if not member:
+            try:
+                member = await guild.fetch_member(uid)
+                await asyncio.sleep(0.2)  # Respect Discord API rate limit pacing
+            except Exception:
+                member = None
+
         if member:
             checked += 1
             if role not in member.roles:

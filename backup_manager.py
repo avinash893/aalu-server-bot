@@ -5,6 +5,7 @@ and allows granular or full restoration of any section with exact permissions pr
 """
 
 import os
+import re
 import json
 import logging
 import asyncio
@@ -27,7 +28,7 @@ def _serialize_overwrites(overwrites: Dict[Any, discord.PermissionOverwrite]) ->
         serialized.append({
             "target_type": target_type,
             "target_id": target.id,
-            "target_name": target.name,
+            "target_name": getattr(target, "name", str(target.id)),
             "allow": allow.value,
             "deny": deny.value,
         })
@@ -115,8 +116,9 @@ def create_backup(guild: discord.Guild) -> Tuple[bool, str, dict]:
 
         with open(ts_path, "w", encoding="utf-8") as f:
             json.dump(snapshot, f, indent=2, ensure_ascii=False)
-        with open(latest_path, "w", encoding="utf-8") as f:
+        with open(latest_path + ".tmp", "w", encoding="utf-8") as f:
             json.dump(snapshot, f, indent=2, ensure_ascii=False)
+        os.replace(latest_path + ".tmp", latest_path)
 
         stats = snapshot["stats"]
         msg = (
@@ -137,7 +139,7 @@ def load_latest_backup(guild_id: int) -> Optional[dict]:
     latest_path = os.path.join(BACKUP_DIR, f"backup_{guild_id}_latest.json")
     if os.path.exists(latest_path):
         try:
-            with open(latest_path, "r", encoding="utf-8") as f:
+            with open(latest_path, "r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except Exception as e:
             logger.error(f"Error reading latest backup: {e}")
@@ -376,7 +378,9 @@ async def restore_specific_channel(guild: discord.Guild, snapshot: dict, channel
 
     matched = None
     for c in channels_data:
-        if c.get("name", "").lower() == ch_target or ch_target in c.get("name", "").lower():
+        c_name = c.get("name", "").lower()
+        c_id = str(c.get("id", ""))
+        if c_name == ch_target or ch_target in c_name or c_id == ch_target:
             matched = c
             break
 
@@ -398,7 +402,7 @@ async def restore_specific_channel(guild: discord.Guild, snapshot: dict, channel
             except Exception:
                 pass
 
-    existing = discord.utils.find(lambda c: c.name.lower() == ch_name.lower(), guild.channels)
+    existing = discord.utils.find(lambda c: c.name.lower() == ch_name.lower() or str(c.id) == str(matched.get("id")), guild.channels)
     try:
         if not existing:
             if ch_type == "voice":
@@ -433,24 +437,44 @@ async def restore_specific_channel(guild: discord.Guild, snapshot: dict, channel
 async def restore_specific_role(guild: discord.Guild, snapshot: dict, role_name: str) -> Tuple[bool, str]:
     """Restore a specific role with its color, hoist, and permissions."""
     r_target = role_name.lower().strip()
+    r_clean_id = re.sub(r'[^0-9]', '', r_target)
     roles_data = snapshot.get("roles", [])
 
     matched = None
     for r in roles_data:
-        if r.get("name", "").lower() == r_target or r_target in r.get("name", "").lower():
+        r_entry_name = r.get("name", "").lower()
+        r_entry_id = str(r.get("id", ""))
+        if (
+            r_entry_name == r_target
+            or r_target in r_entry_name
+            or r_entry_id == r_target
+            or (r_clean_id and r_entry_id == r_clean_id)
+        ):
             matched = r
             break
 
     if not matched:
-        return False, f"❌ Role `{role_name}` backup snapshot me nahi mila!"
+        if r_target in ("@everyone", "everyone", "default"):
+            matched = {"name": "@everyone", "is_default": True, "permissions": guild.default_role.permissions.value}
+        else:
+            return False, f"❌ Role `{role_name}` backup snapshot me nahi mila!"
 
-    r_name = matched.get("name")
-    color = discord.Color(matched.get("color", 0))
+    r_name = matched.get("name", role_name)
     perms = discord.Permissions(matched.get("permissions", 0))
+
+    # @everyone role special handling: Cannot edit color, hoist, or mentionable
+    if r_name == "@everyone" or matched.get("is_default") or r_target in ("@everyone", "everyone", "default"):
+        try:
+            await guild.default_role.edit(permissions=perms, reason="Tillu restore default role update")
+            return True, "✅ **Role Updated!** `@everyone` default role ke permissions restore kar diye gaye!"
+        except Exception as e:
+            return False, f"⚠️ Restore default role failed: {e}"
+
+    color = discord.Color(matched.get("color", 0))
     hoist = bool(matched.get("hoist", False))
     mentionable = bool(matched.get("mentionable", True))
 
-    existing = discord.utils.find(lambda r: r.name.lower() == r_name.lower(), guild.roles)
+    existing = discord.utils.find(lambda r: r.name.lower() == r_name.lower() or str(r.id) == str(matched.get("id")), guild.roles)
     try:
         if not existing:
             new_role = await guild.create_role(

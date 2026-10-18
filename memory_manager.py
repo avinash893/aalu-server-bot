@@ -47,7 +47,7 @@ class MemoryManager:
             # 1. Load local file first
             if os.path.exists(self.file_path):
                 try:
-                    with open(self.file_path, "r", encoding="utf-8") as f:
+                    with open(self.file_path, "r", encoding="utf-8-sig") as f:
                         data = json.load(f)
                         raw_m = data.get("memories", {})
                         if isinstance(raw_m, list):
@@ -70,11 +70,11 @@ class MemoryManager:
                 except Exception as e:
                     logger.warning(f"Error reading local memory file: {e}")
             
-            # 2. Sync from GitHub API in background / initial load
-            self._fetch_remote()
+        # 2. Sync from GitHub API in background / initial load without holding lock
+        self._fetch_remote()
 
     def _fetch_remote(self):
-        """Fetch remote memory from GitHub."""
+        """Fetch remote memory from GitHub without holding lock during HTTP."""
         if not self.repo or not self.token:
             return
         url = f"https://api.github.com/repos/{self.repo}/contents/tillu_memory.json"
@@ -82,30 +82,31 @@ class MemoryManager:
             r = requests.get(url, headers=self._get_github_headers(), timeout=10)
             if r.status_code == 200:
                 res = r.json()
-                self.remote_sha = res.get("sha")
+                new_sha = res.get("sha")
                 raw_b64 = res.get("content", "")
                 if raw_b64:
                     raw_str = base64.b64decode(raw_b64).decode("utf-8", errors="ignore")
                     remote_data = json.loads(raw_str)
                     remote_mems = remote_data.get("memories", {})
-                    # Merge or adopt remote memories (support dict or list)
-                    if isinstance(remote_mems, list):
-                        for idx, item in enumerate(remote_mems):
-                            if isinstance(item, dict):
-                                fact = item.get("fact") or item.get("content", "")
-                                topic = item.get("topic") or (normalize_topic(fact[:30]) if fact else f"memory_{idx+1}")
-                                self.memories[topic] = {
-                                    "topic": topic,
-                                    "content": fact,
-                                    "updated_by": item.get("added_by", "System"),
-                                    "updated_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-                                }
-                        self._write_local_file()
-                        logger.info(f"Synced {len(self.memories)} memories from GitHub repository.")
-                    elif isinstance(remote_mems, dict) and remote_mems:
-                        self.memories.update(remote_mems)
-                        self._write_local_file()
-                        logger.info(f"Synced {len(self.memories)} memories from GitHub repository.")
+                    with self.lock:
+                        self.remote_sha = new_sha
+                        if isinstance(remote_mems, list):
+                            for idx, item in enumerate(remote_mems):
+                                if isinstance(item, dict):
+                                    fact = item.get("fact") or item.get("content", "")
+                                    topic = item.get("topic") or (normalize_topic(fact[:30]) if fact else f"memory_{idx+1}")
+                                    self.memories[topic] = {
+                                        "topic": topic,
+                                        "content": fact,
+                                        "updated_by": item.get("added_by", "System"),
+                                        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
+                                    }
+                            self._write_local_file()
+                            logger.info(f"Synced {len(self.memories)} memories from GitHub repository.")
+                        elif isinstance(remote_mems, dict) and remote_mems:
+                            self.memories.update(remote_mems)
+                            self._write_local_file()
+                            logger.info(f"Synced {len(self.memories)} memories from GitHub repository.")
             elif r.status_code == 404:
                 # If remote doesn't exist yet, save local to remote
                 self._push_remote()
@@ -128,51 +129,55 @@ class MemoryManager:
             logger.error(f"Failed to write local memory file: {e}")
 
     def _push_remote(self):
-        """Push memory updates to GitHub repository."""
+        """Push memory updates to GitHub repository without locking the whole process."""
         if not self.repo or not self.token:
             return
         def _task():
             with self.lock:
-                url = f"https://api.github.com/repos/{self.repo}/contents/tillu_memory.json"
-                # Check current sha if unknown
-                headers = self._get_github_headers()
-                if not self.remote_sha:
-                    try:
-                        r = requests.get(url, headers=headers, timeout=10)
-                        if r.status_code == 200:
-                            self.remote_sha = r.json().get("sha")
-                    except Exception:
-                        pass
+                memories_snapshot = dict(self.memories)
+                curr_sha = self.remote_sha
 
-                data = {
-                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "count": len(self.memories),
-                    "memories": self.memories
-                }
-                content_str = json.dumps(data, indent=2, ensure_ascii=False)
-                content_b64 = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
-
-                payload = {
-                    "message": f"Update Tillu memory ({len(self.memories)} items)",
-                    "content": content_b64
-                }
-                if self.remote_sha:
-                    payload["sha"] = self.remote_sha
-
+            url = f"https://api.github.com/repos/{self.repo}/contents/tillu_memory.json"
+            headers = self._get_github_headers()
+            if not curr_sha:
                 try:
-                    res = requests.put(url, headers=headers, json=payload, timeout=15)
-                    if res.status_code in (200, 201):
-                        self.remote_sha = res.json().get("content", {}).get("sha", self.remote_sha)
-                        logger.info(f"Successfully pushed memory update to GitHub ({self.repo})!")
-                    else:
-                        logger.warning(f"GitHub memory push returned {res.status_code}: {res.text[:200]}")
-                except Exception as ex:
-                    logger.error(f"GitHub memory push exception: {ex}")
+                    r = requests.get(url, headers=headers, timeout=10)
+                    if r.status_code == 200:
+                        curr_sha = r.json().get("sha")
+                except Exception:
+                    pass
+
+            data = {
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "count": len(memories_snapshot),
+                "memories": memories_snapshot
+            }
+            content_str = json.dumps(data, indent=2, ensure_ascii=False)
+            content_b64 = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
+
+            payload = {
+                "message": f"Update Tillu memory ({len(memories_snapshot)} items)",
+                "content": content_b64
+            }
+            if curr_sha:
+                payload["sha"] = curr_sha
+
+            try:
+                res = requests.put(url, headers=headers, json=payload, timeout=15)
+                if res.status_code in (200, 201):
+                    new_sha = res.json().get("content", {}).get("sha", curr_sha)
+                    with self.lock:
+                        self.remote_sha = new_sha
+                    logger.info(f"Successfully pushed memory update to GitHub ({self.repo})!")
+                else:
+                    logger.warning(f"GitHub memory push returned {res.status_code}: {res.text[:200]}")
+            except Exception as ex:
+                logger.error(f"GitHub memory push exception: {ex}")
 
         # Run non-blocking in daemon thread
         threading.Thread(target=_task, daemon=True).start()
 
-    def add_or_update(self, topic: str, content: str, author: str = "Admin") -> tuple[str, str, bool]:
+    def add_or_update(self, topic: str, content: str, author: str = "Admin", push_remote: bool = True) -> tuple[str, str, bool]:
         """
         Add or overwrite a memory entry on the same topic.
         Returns (clean_topic, content, was_overwritten).
@@ -189,8 +194,9 @@ class MemoryManager:
             }
             self._write_local_file()
 
-        # Trigger background cloud push
-        self._push_remote()
+        # Trigger background cloud push if requested
+        if push_remote:
+            self._push_remote()
         return clean_topic, content_clean, was_overwritten
 
     def delete(self, topic: str) -> bool:
@@ -241,21 +247,24 @@ class MemoryManager:
                 data = json.loads(clean)
                 if isinstance(data, dict):
                     if "topic" in data and "content" in data:
-                        results.append(self.add_or_update(str(data["topic"]), str(data["content"]), author))
+                        results.append(self.add_or_update(str(data["topic"]), str(data["content"]), author, push_remote=False))
                     else:
                         for k, v in data.items():
                             if isinstance(v, (str, int, float, bool)):
-                                results.append(self.add_or_update(str(k), str(v), author))
+                                results.append(self.add_or_update(str(k), str(v), author, push_remote=False))
                             elif isinstance(v, dict) and "content" in v:
-                                results.append(self.add_or_update(str(k), str(v["content"]), author))
+                                results.append(self.add_or_update(str(k), str(v["content"]), author, push_remote=False))
                             else:
-                                results.append(self.add_or_update(str(k), json.dumps(v), author))
+                                results.append(self.add_or_update(str(k), json.dumps(v), author, push_remote=False))
+                    if results:
+                        self._push_remote()
                     return results
                 elif isinstance(data, list):
                     for item in data:
                         if isinstance(item, dict) and "topic" in item and "content" in item:
-                            results.append(self.add_or_update(str(item["topic"]), str(item["content"]), author))
+                            results.append(self.add_or_update(str(item["topic"]), str(item["content"]), author, push_remote=False))
                     if results:
+                        self._push_remote()
                         return results
             except Exception:
                 pass
@@ -272,7 +281,7 @@ class MemoryManager:
                 t_part = parts[0].replace("topic:", "").replace("Topic:", "").strip()
                 c_part = parts[1].replace("content:", "").replace("Content:", "").strip()
                 if t_part and c_part:
-                    results.append(self.add_or_update(t_part, c_part, author))
+                    results.append(self.add_or_update(t_part, c_part, author, push_remote=False))
                     continue
 
             # Colon / Equals format: key: value or key = value
@@ -281,13 +290,16 @@ class MemoryManager:
                 t = m.group(1).strip().lstrip("-* ")
                 c = m.group(2).strip()
                 if t and c:
-                    results.append(self.add_or_update(t, c, author))
+                    results.append(self.add_or_update(t, c, author, push_remote=False))
                     continue
 
         # If nothing matched, treat the whole text as a general memory or single entry
         if not results and len(clean) > 3:
             first_words = clean.split()[:3]
             auto_topic = "_".join(first_words)
-            results.append(self.add_or_update(auto_topic, clean, author))
+            results.append(self.add_or_update(auto_topic, clean, author, push_remote=False))
+
+        if results:
+            self._push_remote()
 
         return results

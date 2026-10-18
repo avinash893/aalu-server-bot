@@ -44,7 +44,7 @@ class RuleManager:
         with self.lock:
             if os.path.exists(self.file_path):
                 try:
-                    with open(self.file_path, "r", encoding="utf-8") as f:
+                    with open(self.file_path, "r", encoding="utf-8-sig") as f:
                         data = json.load(f)
                         raw_r = data.get("rules", {})
                         if isinstance(raw_r, dict):
@@ -55,10 +55,10 @@ class RuleManager:
                 except Exception as e:
                     logger.warning(f"Error reading local rules file: {e}")
 
-            self._fetch_remote()
+        self._fetch_remote()
 
     def _fetch_remote(self):
-        """Fetch remote rules from GitHub."""
+        """Fetch remote rules from GitHub without holding lock during HTTP."""
         if not self.repo or not self.token:
             return
         url = f"https://api.github.com/repos/{self.repo}/contents/autonomous_rules.json"
@@ -66,20 +66,22 @@ class RuleManager:
             r = requests.get(url, headers=self._get_github_headers(), timeout=10)
             if r.status_code == 200:
                 res = r.json()
-                self.remote_sha = res.get("sha")
+                new_sha = res.get("sha")
                 raw_b64 = res.get("content", "")
                 if raw_b64:
                     raw_str = base64.b64decode(raw_b64).decode("utf-8", errors="ignore")
                     remote_data = json.loads(raw_str)
                     remote_rules = remote_data.get("rules", {})
-                    if isinstance(remote_rules, dict):
-                        self.rules.update(remote_rules)
-                    elif isinstance(remote_rules, list):
-                        for i, r in enumerate(remote_rules):
-                            rid = r.get("id", f"rule_{i+1}")
-                            self.rules[rid] = r
-                    logger.info(f"Synced {len(self.rules)} autonomous rules from GitHub repository.")
-                    self._save_local_unlocked()
+                    with self.lock:
+                        self.remote_sha = new_sha
+                        if isinstance(remote_rules, dict):
+                            self.rules.update(remote_rules)
+                        elif isinstance(remote_rules, list):
+                            for i, r in enumerate(remote_rules):
+                                rid = r.get("id", f"rule_{i+1}")
+                                self.rules[rid] = r
+                        logger.info(f"Synced {len(self.rules)} autonomous rules from GitHub repository.")
+                        self._save_local_unlocked()
         except Exception as e:
             logger.warning(f"Failed to fetch autonomous rules from GitHub: {e}")
 
@@ -98,52 +100,57 @@ class RuleManager:
             logger.error(f"Failed to write local rules file: {e}")
 
     def _push_remote(self, commit_message: str):
-        """Push rules update to GitHub asynchronously."""
+        """Push rules update to GitHub asynchronously without locking the entire thread."""
         if not self.repo or not self.token:
             return
         def _task():
             with self.lock:
-                url = f"https://api.github.com/repos/{self.repo}/contents/autonomous_rules.json"
-                headers = self._get_github_headers()
-                if not self.remote_sha:
-                    try:
-                        r = requests.get(url, headers=headers, timeout=10)
-                        if r.status_code == 200:
-                            self.remote_sha = r.json().get("sha")
-                    except Exception:
-                        pass
+                rules_snapshot = dict(self.rules)
+                curr_sha = self.remote_sha
 
-                data = {
-                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "count": len(self.rules),
-                    "rules": self.rules
-                }
-                content_str = json.dumps(data, indent=2, ensure_ascii=False)
-                content_b64 = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
-
-                payload = {
-                    "message": commit_message,
-                    "content": content_b64
-                }
-                if self.remote_sha:
-                    payload["sha"] = self.remote_sha
-
+            url = f"https://api.github.com/repos/{self.repo}/contents/autonomous_rules.json"
+            headers = self._get_github_headers()
+            if not curr_sha:
                 try:
-                    res = requests.put(url, headers=headers, json=payload, timeout=15)
-                    if res.status_code in (200, 201):
-                        self.remote_sha = res.json().get("content", {}).get("sha", self.remote_sha)
-                        logger.info(f"Autonomous rules successfully committed to GitHub ({commit_message})")
-                    else:
-                        logger.warning(f"GitHub rules commit failed: HTTP {res.status_code} {res.text[:100]}")
-                except Exception as e:
-                    logger.error(f"GitHub rules push exception: {e}")
+                    r = requests.get(url, headers=headers, timeout=10)
+                    if r.status_code == 200:
+                        curr_sha = r.json().get("sha")
+                except Exception:
+                    pass
+
+            data = {
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "count": len(rules_snapshot),
+                "rules": rules_snapshot
+            }
+            content_str = json.dumps(data, indent=2, ensure_ascii=False)
+            content_b64 = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
+
+            payload = {
+                "message": commit_message,
+                "content": content_b64
+            }
+            if curr_sha:
+                payload["sha"] = curr_sha
+
+            try:
+                res = requests.put(url, headers=headers, json=payload, timeout=15)
+                if res.status_code in (200, 201):
+                    new_sha = res.json().get("content", {}).get("sha", curr_sha)
+                    with self.lock:
+                        self.remote_sha = new_sha
+                    logger.info(f"Autonomous rules successfully committed to GitHub ({commit_message})")
+                else:
+                    logger.warning(f"GitHub rules commit failed: HTTP {res.status_code} {res.text[:100]}")
+            except Exception as e:
+                logger.error(f"GitHub rules push exception: {e}")
 
         threading.Thread(target=_task, daemon=True).start()
 
     def add_rule(self, rule_data: Dict[str, Any], author: str = "Admin") -> Tuple[str, Dict[str, Any]]:
         """Add or update an autonomous rule, save locally and sync to GitHub."""
         with self.lock:
-            rule_id = rule_data.get("id") or f"rule_{int(time.time())}"
+            rule_id = rule_data.get("id") or f"rule_{int(time.time() * 1000)}"
             rule_data["id"] = rule_id
             rule_data["author"] = author
             rule_data["created_at"] = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
@@ -190,8 +197,10 @@ class RuleManager:
                 target_user_id = condition.get("user_id")
                 is_target = False
                 try:
-                    if target_user_id and str(target_user_id).isdigit():
-                        is_target = (author_id == int(target_user_id))
+                    if target_user_id:
+                        clean_uid = str(target_user_id).strip("<@!> ")
+                        if clean_uid.isdigit():
+                            is_target = (author_id == int(clean_uid))
                 except Exception:
                     is_target = False
 
@@ -246,7 +255,7 @@ class RuleManager:
             # 3. Check Server Trigger (e.g. execute Minecraft command on chat trigger)
             elif rtype == "server_action":
                 trigger_phrase = condition.get("phrase", "").lower()
-                if trigger_phrase and trigger_phrase in content_lower:
+                if trigger_phrase and re.search(rf'(?:\b|^){re.escape(trigger_phrase)}(?:\b|$)', content_lower):
                     mc_cmd = action.get("command")
                     if mc_cmd and server_cmd_fn:
                         try:
@@ -261,7 +270,7 @@ class RuleManager:
             # 4. Custom Automated Reply Rule
             elif rtype == "custom_response":
                 trigger_phrase = condition.get("phrase", "").lower()
-                if trigger_phrase and trigger_phrase in content_lower:
+                if trigger_phrase and re.search(rf'(?:\b|^){re.escape(trigger_phrase)}(?:\b|$)', content_lower):
                     reply = action.get("reply_message")
                     if reply:
                         try:

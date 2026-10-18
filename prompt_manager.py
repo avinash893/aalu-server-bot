@@ -49,7 +49,7 @@ class PromptManager:
         with self.lock:
             if os.path.exists(self.file_path):
                 try:
-                    with open(self.file_path, "r", encoding="utf-8") as f:
+                    with open(self.file_path, "r", encoding="utf-8-sig") as f:
                         data = json.load(f)
                         self.custom_instructions = data.get("custom_instructions", [])
                         self.active_tone = data.get("active_tone", self.active_tone)
@@ -57,10 +57,10 @@ class PromptManager:
                 except Exception as e:
                     logger.warning(f"Error reading local personality file: {e}")
 
-            self._fetch_remote()
+        self._fetch_remote()
 
     def _fetch_remote(self):
-        """Fetch remote personality settings from GitHub."""
+        """Fetch remote personality settings from GitHub without holding lock during HTTP."""
         if not self.repo or not self.token:
             return
         url = f"https://api.github.com/repos/{self.repo}/contents/tillu_personality.json"
@@ -68,15 +68,17 @@ class PromptManager:
             r = requests.get(url, headers=self._get_github_headers(), timeout=10)
             if r.status_code == 200:
                 res = r.json()
-                self.remote_sha = res.get("sha")
+                new_sha = res.get("sha")
                 raw_b64 = res.get("content", "")
                 if raw_b64:
                     raw_str = base64.b64decode(raw_b64).decode("utf-8", errors="ignore")
                     data = json.loads(raw_str)
-                    self.custom_instructions = data.get("custom_instructions", self.custom_instructions)
-                    self.active_tone = data.get("active_tone", self.active_tone)
-                    logger.info("Synced dynamic personality and prompt instructions from GitHub.")
-                    self._save_local_unlocked()
+                    with self.lock:
+                        self.remote_sha = new_sha
+                        self.custom_instructions = data.get("custom_instructions", self.custom_instructions)
+                        self.active_tone = data.get("active_tone", self.active_tone)
+                        logger.info("Synced dynamic personality and prompt instructions from GitHub.")
+                        self._save_local_unlocked()
         except Exception as e:
             logger.warning(f"Failed to fetch personality from GitHub: {e}")
 
@@ -99,38 +101,44 @@ class PromptManager:
             return
         def _task():
             with self.lock:
-                url = f"https://api.github.com/repos/{self.repo}/contents/tillu_personality.json"
-                headers = self._get_github_headers()
-                if not self.remote_sha:
-                    try:
-                        r = requests.get(url, headers=headers, timeout=10)
-                        if r.status_code == 200:
-                            self.remote_sha = r.json().get("sha")
-                    except Exception:
-                        pass
+                tone_snapshot = self.active_tone
+                instructions_snapshot = list(self.custom_instructions)
+                curr_sha = self.remote_sha
 
-                data = {
-                    "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "active_tone": self.active_tone,
-                    "custom_instructions": self.custom_instructions
-                }
-                content_str = json.dumps(data, indent=2, ensure_ascii=False)
-                content_b64 = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
-
-                payload = {
-                    "message": commit_message,
-                    "content": content_b64
-                }
-                if self.remote_sha:
-                    payload["sha"] = self.remote_sha
-
+            url = f"https://api.github.com/repos/{self.repo}/contents/tillu_personality.json"
+            headers = self._get_github_headers()
+            if not curr_sha:
                 try:
-                    res = requests.put(url, headers=headers, json=payload, timeout=15)
-                    if res.status_code in (200, 201):
-                        self.remote_sha = res.json().get("content", {}).get("sha", self.remote_sha)
-                        logger.info(f"Personality successfully committed to GitHub ({commit_message})")
-                except Exception as e:
-                    logger.error(f"GitHub personality push exception: {e}")
+                    r = requests.get(url, headers=headers, timeout=10)
+                    if r.status_code == 200:
+                        curr_sha = r.json().get("sha")
+                except Exception:
+                    pass
+
+            data = {
+                "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "active_tone": tone_snapshot,
+                "custom_instructions": instructions_snapshot
+            }
+            content_str = json.dumps(data, indent=2, ensure_ascii=False)
+            content_b64 = base64.b64encode(content_str.encode("utf-8")).decode("utf-8")
+
+            payload = {
+                "message": commit_message,
+                "content": content_b64
+            }
+            if curr_sha:
+                payload["sha"] = curr_sha
+
+            try:
+                res = requests.put(url, headers=headers, json=payload, timeout=15)
+                if res.status_code in (200, 201):
+                    new_sha = res.json().get("content", {}).get("sha", curr_sha)
+                    with self.lock:
+                        self.remote_sha = new_sha
+                    logger.info(f"Personality successfully committed to GitHub ({commit_message})")
+            except Exception as e:
+                logger.error(f"GitHub personality push exception: {e}")
 
         threading.Thread(target=_task, daemon=True).start()
 

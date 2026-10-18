@@ -261,7 +261,7 @@ def check_cooldown(user, guild=None) -> tuple[bool, int]:
 def load_whitelist_registry() -> dict:
     if os.path.exists(WHITELIST_REGISTRY_PATH):
         try:
-            with open(WHITELIST_REGISTRY_PATH, "r", encoding="utf-8") as f:
+            with open(WHITELIST_REGISTRY_PATH, "r", encoding="utf-8-sig") as f:
                 return json.load(f)
         except Exception:
             return {}
@@ -269,8 +269,10 @@ def load_whitelist_registry() -> dict:
 
 def save_whitelist_registry(data: dict):
     try:
-        with open(WHITELIST_REGISTRY_PATH, "w", encoding="utf-8") as f:
+        tmp_path = WHITELIST_REGISTRY_PATH + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp_path, WHITELIST_REGISTRY_PATH)
     except Exception as e:
         logging.error(f"Failed to save whitelist registry: {e}")
 
@@ -491,12 +493,17 @@ def send_console_command(command: str) -> tuple[bool, str]:
 
 async def execute_whitelist_command(ign: str) -> bool:
     """Execute whitelist commands for a player IGN across console and panel."""
-    clean_ign = ign.strip()
-    await execute_server_command(f"whitelist add {clean_ign}")
-    if " " in clean_ign:
-        await execute_server_command(f'whitelist add "{clean_ign}"')
-    if not clean_ign.startswith(".") and " " not in clean_ign:
-        await execute_server_command(f"whitelist add .{clean_ign}")
+    clean_ign = ign.strip().strip('"\'')
+    quoted = f'"{clean_ign}"' if " " in clean_ign else clean_ign
+    await execute_server_command(f"whitelist add {quoted}")
+    if clean_ign.startswith("."):
+        alt = clean_ign[1:]
+        alt_quoted = f'"{alt}"' if " " in alt else alt
+        await execute_server_command(f"whitelist add {alt_quoted}")
+    else:
+        alt = f".{clean_ign}"
+        alt_quoted = f'"{alt}"' if " " in alt else alt
+        await execute_server_command(f"whitelist add {alt_quoted}")
     await execute_server_command("whitelist reload")
     try:
         wch = bot.get_channel(WHITELIST_CHANNEL_ID)
@@ -508,17 +515,22 @@ async def execute_whitelist_command(ign: str) -> bool:
 
 async def execute_unwhitelist_command(ign: str) -> bool:
     """Execute unwhitelist commands for a player IGN across console and panel."""
-    clean_ign = ign.strip()
-    await execute_server_command(f"whitelist remove {clean_ign}")
-    if " " in clean_ign:
-        await execute_server_command(f'whitelist remove "{clean_ign}"')
-    if not clean_ign.startswith(".") and " " not in clean_ign:
-        await execute_server_command(f"whitelist remove .{clean_ign}")
+    clean_ign = ign.strip().strip('"\'')
+    quoted = f'"{clean_ign}"' if " " in clean_ign else clean_ign
+    await execute_server_command(f"whitelist remove {quoted}")
+    if clean_ign.startswith("."):
+        alt = clean_ign[1:]
+        alt_quoted = f'"{alt}"' if " " in alt else alt
+        await execute_server_command(f"whitelist remove {alt_quoted}")
+    else:
+        alt = f".{clean_ign}"
+        alt_quoted = f'"{alt}"' if " " in alt else alt
+        await execute_server_command(f"whitelist remove {alt_quoted}")
     await execute_server_command("whitelist reload")
     return True
 
 def send_whitelist_command(ign: str) -> bool:
-    clean_ign = ign.strip()
+    clean_ign = ign.strip().strip('"\'')
     if bot and bot.loop and bot.loop.is_running():
         try:
             asyncio.run_coroutine_threadsafe(execute_whitelist_command(clean_ign), bot.loop)
@@ -526,9 +538,16 @@ def send_whitelist_command(ign: str) -> bool:
         except Exception:
             pass
     try:
-        panel_send_command(f"whitelist add {clean_ign}")
-        if " " in clean_ign:
-            panel_send_command(f'whitelist add "{clean_ign}"')
+        quoted = f'"{clean_ign}"' if " " in clean_ign else clean_ign
+        panel_send_command(f"whitelist add {quoted}")
+        if clean_ign.startswith("."):
+            alt = clean_ign[1:]
+            alt_quoted = f'"{alt}"' if " " in alt else alt
+            panel_send_command(f"whitelist add {alt_quoted}")
+        else:
+            alt = f".{clean_ign}"
+            alt_quoted = f'"{alt}"' if " " in alt else alt
+            panel_send_command(f"whitelist add {alt_quoted}")
         panel_send_command("whitelist reload")
         return True
     except Exception:
@@ -659,8 +678,26 @@ def analyze_image_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> st
     if not POLLINATIONS_API_KEY:
         return ""
     try:
-        b64_img = base64.b64encode(image_bytes).decode("utf-8")
-        data_uri = f"data:{mime_type};base64,{b64_img}"
+        # Pre-compress and resize image with PIL if large to prevent timeouts and payload errors
+        processed_bytes = image_bytes
+        processed_mime = mime_type
+        try:
+            from PIL import Image
+            import io
+            if len(image_bytes) > 800 * 1024:
+                with Image.open(io.BytesIO(image_bytes)) as img:
+                    img.thumbnail((1280, 1280))
+                    if img.mode in ("RGBA", "P"):
+                        img = img.convert("RGB")
+                    out = io.BytesIO()
+                    img.save(out, format="JPEG", quality=85, optimize=True)
+                    processed_bytes = out.getvalue()
+                    processed_mime = "image/jpeg"
+        except Exception as pe:
+            logging.debug(f"[Vision AI] PIL compression notice: {pe}")
+
+        b64_img = base64.b64encode(processed_bytes).decode("utf-8")
+        data_uri = f"data:{processed_mime};base64,{b64_img}"
         headers = {
             "Authorization": f"Bearer {POLLINATIONS_API_KEY}",
             "Content-Type": "application/json"
@@ -862,19 +899,19 @@ async def find_channel_context_message(message: discord.Message, query: str) -> 
             if term in txt.lower():
                 return {"author": getattr(m.author, "display_name", "") or m.author.name, "content": txt[:400]}
 
-    # 8. Default fallback: Same user's previous message (back of 1 message)
-    for m in recent:
-        if m.author.id == message.author.id:
-            txt = m.clean_content or m.content or ""
+    # 8. Contextual pronoun fallback: only if user query refers to a previous topic ('it', 'that', 'iska', 'yeh', etc.)
+    has_context_ref = bool(re.search(r'\b(it|this|that|iska|isko|usko|isme|usme|kya tha|pichla|previous|earlier)\b', query_lower))
+    if has_context_ref:
+        for m in recent:
+            if m.author.id == message.author.id:
+                txt = m.clean_content or m.content or ""
+                if txt:
+                    return {"author": getattr(m.author, "display_name", "") or m.author.name, "content": txt[:400]}
+        if recent:
+            first_m = recent[0]
+            txt = first_m.clean_content or first_m.content or ""
             if txt:
-                return {"author": getattr(m.author, "display_name", "") or m.author.name, "content": txt[:400]}
-
-    # If no message by same user, take immediate preceding message
-    if recent:
-        first_m = recent[0]
-        txt = first_m.clean_content or first_m.content or ""
-        if txt:
-            return {"author": getattr(first_m.author, "display_name", "") or first_m.author.name, "content": txt[:400]}
+                return {"author": getattr(first_m.author, "display_name", "") or first_m.author.name, "content": txt[:400]}
 
     return None
 
@@ -1492,6 +1529,8 @@ class TilluBot(commands.Bot):
         logging.info("[SetupHook] Persistent ServerControlView registered.")
 
         for gid in [PRIMARY_GUILD_ID, CS2_GUILD_ID]:
+            if not gid:
+                continue
             try:
                 g_obj = discord.Object(id=gid)
                 self.tree.copy_global_to(guild=g_obj)
@@ -1508,6 +1547,39 @@ class TilluBot(commands.Bot):
 
 bot = TilluBot(command_prefix=['!', '/', '.'], intents=intents, help_command=None)
 
+def split_discord_chunks(text: str, max_size: int = 1950) -> list:
+    """Split text into chunks smaller than Discord's 2000 character limit."""
+    if not text:
+        return [""]
+    if len(text) <= max_size:
+        return [text]
+    chunks = []
+    while len(text) > max_size:
+        split_at = text.rfind("\n", 0, max_size)
+        if split_at == -1 or split_at < max_size // 2:
+            split_at = text.rfind(" ", 0, max_size)
+        if split_at == -1 or split_at < max_size // 2:
+            split_at = max_size
+        chunks.append(text[:split_at].strip())
+        text = text[split_at:].strip()
+    if text:
+        chunks.append(text)
+    return chunks
+
+async def safe_send_interaction(interaction: discord.Interaction, content: str = None, *, embed: discord.Embed = None, view: discord.ui.View = None, ephemeral: bool = True):
+    """Safely reply to an interaction using followup.send if already responded/deferred, avoiding InteractionResponded errors."""
+    try:
+        if interaction.response.is_done():
+            if view:
+                return await interaction.followup.send(content=content, embed=embed, view=view, ephemeral=ephemeral)
+            return await interaction.followup.send(content=content, embed=embed, ephemeral=ephemeral)
+        else:
+            if view:
+                return await interaction.response.send_message(content=content, embed=embed, view=view, ephemeral=ephemeral)
+            return await interaction.response.send_message(content=content, embed=embed, ephemeral=ephemeral)
+    except Exception as e:
+        logging.warning(f"[safe_send_interaction] Error responding to interaction: {e}")
+
 # ── REQUEST HANDLERS ─────────────────────────────────────────────────────────
 async def handle_status_request(interaction_or_ctx, user=None, guild=None):
     is_inter = isinstance(interaction_or_ctx, discord.Interaction)
@@ -1518,7 +1590,11 @@ async def handle_status_request(interaction_or_ctx, user=None, guild=None):
         if not interaction_or_ctx.response.is_done():
             try: await interaction_or_ctx.response.defer(ephemeral=True)
             except Exception: pass
-        reply_fn = (lambda *a, **kw: interaction_or_ctx.followup.send(*a, ephemeral=True, **kw)) if interaction_or_ctx.response.is_done() else (lambda *a, **kw: interaction_or_ctx.response.send_message(*a, ephemeral=True, **kw))
+        async def reply_fn(*args, **kwargs):
+            kwargs.setdefault("ephemeral", True)
+            if interaction_or_ctx.response.is_done():
+                return await interaction_or_ctx.followup.send(*args, **kwargs)
+            return await interaction_or_ctx.response.send_message(*args, **kwargs)
     else:
         async def reply_fn(*args, **kwargs):
             try:
@@ -1571,7 +1647,11 @@ async def handle_start_request(interaction_or_ctx, user, guild=None):
         if not interaction_or_ctx.response.is_done():
             try: await interaction_or_ctx.response.defer(ephemeral=True)
             except Exception: pass
-        reply_fn = (lambda *a, **kw: interaction_or_ctx.followup.send(*a, ephemeral=True, **kw)) if interaction_or_ctx.response.is_done() else (lambda *a, **kw: interaction_or_ctx.response.send_message(*a, ephemeral=True, **kw))
+        async def reply_fn(*args, **kwargs):
+            kwargs.setdefault("ephemeral", True)
+            if interaction_or_ctx.response.is_done():
+                return await interaction_or_ctx.followup.send(*args, **kwargs)
+            return await interaction_or_ctx.response.send_message(*args, **kwargs)
     else:
         async def reply_fn(*args, **kwargs):
             try:
@@ -1631,7 +1711,11 @@ async def handle_whitelist_request(interaction_or_ctx, ign: str, user, guild=Non
         if not interaction_or_ctx.response.is_done():
             try: await interaction_or_ctx.response.defer(ephemeral=True)
             except Exception: pass
-        reply_fn = (lambda *a, **kw: interaction_or_ctx.followup.send(*a, ephemeral=True, **kw)) if interaction_or_ctx.response.is_done() else (lambda *a, **kw: interaction_or_ctx.response.send_message(*a, ephemeral=True, **kw))
+        async def reply_fn(*args, **kwargs):
+            kwargs.setdefault("ephemeral", True)
+            if interaction_or_ctx.response.is_done():
+                return await interaction_or_ctx.followup.send(*args, **kwargs)
+            return await interaction_or_ctx.response.send_message(*args, **kwargs)
     else:
         async def reply_fn(*args, **kwargs):
             try:
@@ -1720,10 +1804,17 @@ async def handle_whitelist_request(interaction_or_ctx, ign: str, user, guild=Non
 
     await reply_fn(embed=embed, view=ServerControlView())
 
-    if target_guild and isinstance(user, discord.Member):
+    if target_guild:
         try:
-            import sync_manager
-            asyncio.create_task(sync_manager.sync_single_member(target_guild, user, clean_ign))
+            mem = user if isinstance(user, discord.Member) else target_guild.get_member(user.id)
+            if not mem:
+                try:
+                    mem = await target_guild.fetch_member(user.id)
+                except Exception:
+                    pass
+            if mem:
+                import sync_manager
+                asyncio.create_task(sync_manager.sync_single_member(target_guild, mem, clean_ign))
         except Exception:
             pass
 
@@ -1736,7 +1827,11 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
         if not interaction_or_ctx.response.is_done():
             try: await interaction_or_ctx.response.defer(ephemeral=True)
             except Exception: pass
-        reply_fn = (lambda *a, **kw: interaction_or_ctx.followup.send(*a, ephemeral=True, **kw)) if interaction_or_ctx.response.is_done() else (lambda *a, **kw: interaction_or_ctx.response.send_message(*a, ephemeral=True, **kw))
+        async def reply_fn(*args, **kwargs):
+            kwargs.setdefault("ephemeral", True)
+            if interaction_or_ctx.response.is_done():
+                return await interaction_or_ctx.followup.send(*args, **kwargs)
+            return await interaction_or_ctx.response.send_message(*args, **kwargs)
     else:
         async def reply_fn(*args, **kwargs):
             try:
@@ -1831,14 +1926,38 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
 
             ok, resp_str = await execute_server_command(cmd)
 
-            # If removing from whitelist, also clean local registry
+            # If removing from whitelist, also clean local registry and sync role removal
             if "whitelist remove" in cmd.lower():
-                target_p = cmd.split()[-1]
-                await execute_server_command(f"fwd:whitelist remove {target_p}")
-                await execute_server_command("whitelist reload")
-                reg = load_whitelist_registry()
-                new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower() != target_p.lower()}
-                save_whitelist_registry(new_reg)
+                wl_idx = cmd.lower().find("whitelist remove") + len("whitelist remove")
+                target_p = cmd[wl_idx:].strip().strip('"\'')
+                if target_p:
+                    if target_p.startswith("."):
+                        alt_p = target_p[1:]
+                        alt_q = f'"{alt_p}"' if " " in alt_p else alt_p
+                        await execute_server_command(f"whitelist remove {alt_q}")
+                    else:
+                        alt_p = f".{target_p}"
+                        alt_q = f'"{alt_p}"' if " " in alt_p else alt_p
+                        await execute_server_command(f"whitelist remove {alt_q}")
+                    await execute_server_command("whitelist reload")
+                    reg = load_whitelist_registry()
+                    new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower().lstrip('.') != target_p.lower().lstrip('.')}
+                    save_whitelist_registry(new_reg)
+                    if target_guild:
+                        import sync_manager
+                        for uid_str, udata in reg.items():
+                            if udata.get("ign", "").lower().lstrip('.') == target_p.lower().lstrip('.'):
+                                try:
+                                    mem = target_guild.get_member(int(uid_str))
+                                    if not mem:
+                                        try:
+                                            mem = await target_guild.fetch_member(int(uid_str))
+                                        except Exception:
+                                            pass
+                                    if mem:
+                                        asyncio.create_task(sync_manager.remove_single_member_sync(target_guild, mem))
+                                except Exception:
+                                    pass
 
             clean_reply = answer.replace(match.group(0), "").strip()
             status_tag = f"⚙️ **[Console Action: `{cmd}`]**"
@@ -1916,53 +2035,70 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
     # - Slash Command Interaction -> Private Ephemeral reply (visible only to the user who ran it)
     # - Prefix Command (!tillu) -> Auto-delete after 45s to avoid chat clutter
     # - Normal chat in channel (on_message) -> Publicly visible as clean plain text, NO EMBEDS!
+    chunks = split_discord_chunks(answer, 1950)
     if is_inter:
         if should_show_server_options(query):
             embed = discord.Embed(
                 title="🤖 Tillu",
-                description=answer,
+                description=chunks[0][:4000],
                 color=0x9B59B6
             )
             embed.set_footer(text="Tillu • legacy-7.hexacraft.fun")
             await reply_fn(embed=embed, view=ServerControlView())
+            for c in chunks[1:]:
+                await reply_fn(content=c)
         else:
-            await reply_fn(content=answer)
+            for c in chunks:
+                await reply_fn(content=c)
     elif isinstance(interaction_or_ctx, commands.Context):
-        await reply_fn(content=answer, delete_after=45)
+        for c in chunks:
+            await reply_fn(content=c, delete_after=45)
     else:
         # Normal chat in channel: Publicly visible clean plain text (NO EMBEDS!)
         if hasattr(interaction_or_ctx, "channel"):
             want_tts = bool(re.search(r'\b(tts|voice|awaaz|awaz|bol\s*ke|speak\s*out)\b', query, re.IGNORECASE))
             is_mod_or_above = author_is_owner or is_privileged_user(user, target_guild)
             allowed_m = discord.AllowedMentions(users=True, roles=True, everyone=False) if is_mod_or_above else discord.AllowedMentions.none()
-            await interaction_or_ctx.channel.send(content=answer, tts=want_tts, allowed_mentions=allowed_m)
+            for idx, c in enumerate(chunks):
+                await interaction_or_ctx.channel.send(content=c, tts=(want_tts if idx == 0 else False), allowed_mentions=allowed_m)
         else:
-            await reply_fn(content=answer)
+            for c in chunks:
+                await reply_fn(content=c)
 
 # ── SLASH COMMANDS ───────────────────────────────────────────────────────────
 @bot.tree.command(name="pause", description="Pause Tillu so he stops responding to chat messages")
 async def slash_pause(interaction: discord.Interaction):
     global TILLU_PAUSED
     TILLU_PAUSED = True
-    await interaction.response.send_message("⏸️ **Tillu Paused!** Main chup ho gaya hu. Wapas bulane ke liye `/resume` ya `tillu resume` bol dena.")
+    await safe_send_interaction(interaction, "⏸️ **Tillu Paused!** Main chup ho gaya hu. Wapas bulane ke liye `/resume` ya `tillu resume` bol dena.")
 
 @bot.tree.command(name="resume", description="Resume Tillu so he starts responding to chat again")
 async def slash_resume(interaction: discord.Interaction):
     global TILLU_PAUSED
     TILLU_PAUSED = False
-    await interaction.response.send_message("▶️ **Tillu Resumed!** Main wapas active hu, bolo kya scene hai! 🚀")
+    await safe_send_interaction(interaction, "▶️ **Tillu Resumed!** Main wapas active hu, bolo kya scene hai! 🚀")
 
 @bot.tree.command(name="tts", description="Make Tillu speak out loud using Discord TTS")
 @app_commands.describe(message="The message Tillu should speak out loud")
 async def slash_tts(interaction: discord.Interaction, message: str):
-    await interaction.channel.send(f"🗣️ **{interaction.user.name}:** {message}", tts=True)
-    await interaction.response.send_message("🔊 TTS message bol diya!", ephemeral=True)
+    try:
+        await interaction.channel.send(f"🗣️ **{interaction.user.name}:** {message}", tts=True)
+        await safe_send_interaction(interaction, "🔊 TTS message bol diya!", ephemeral=True)
+    except discord.Forbidden:
+        await safe_send_interaction(interaction, "🚫 I don't have permission to send TTS messages in this channel!", ephemeral=True)
+    except Exception as e:
+        await safe_send_interaction(interaction, f"❌ Failed to send TTS message: {e}", ephemeral=True)
+
 @bot.tree.command(name="ask", description="Ask Tillu anything about the server, stream, or request whitelist!")
 @app_commands.describe(
     query="What would you like to ask Tillu? (e.g. 'whitelist me GamerX' or 'how to join SMP')",
     attachment="Optional image screenshot or photo to show Tillu"
 )
 async def slash_ask(interaction: discord.Interaction, query: str, attachment: Optional[discord.Attachment] = None):
+    try:
+        await interaction.response.defer(ephemeral=True)
+    except Exception:
+        pass
     if attachment:
         is_img = (attachment.content_type and attachment.content_type.startswith("image/")) or any(
             attachment.filename.lower().endswith(ext) for ext in [".png", ".jpg", ".jpeg", ".webp"]
@@ -1995,41 +2131,60 @@ async def slash_whitelist(interaction: discord.Interaction, ign: str):
 @app_commands.describe(command="The exact console command to execute (e.g. 'say Hello' or 'whitelist reload')")
 async def slash_console(interaction: discord.Interaction, command: str):
     if not is_privileged_user(interaction.user, interaction.guild):
-        await interaction.response.send_message("🚫 Only Server Owner, Admins, and Moderators can execute console commands!", ephemeral=True)
+        await safe_send_interaction(interaction, "🚫 Only Server Owner, Admins, and Moderators can execute console commands!", ephemeral=True)
         return
     ok, resp = await execute_server_command(command)
-    await interaction.response.send_message(f"⚙️ **[Console Action: `{command}`]**\nDispatched to <#{CONSOLE_CHANNEL_ID}>! Check <#{CONSOLE_CHANNEL_ID}> for live execution.", ephemeral=True)
+    await safe_send_interaction(interaction, f"⚙️ **[Console Action: `{command}`]**\nDispatched to <#{CONSOLE_CHANNEL_ID}>! Check <#{CONSOLE_CHANNEL_ID}> for live execution.", ephemeral=True)
 
 @bot.tree.command(name="ban", description="Owner/Admin/Mod only: Ban a player from the Minecraft server")
 @app_commands.describe(player="Minecraft player username", reason="Reason for ban")
 async def slash_ban(interaction: discord.Interaction, player: str, reason: str = "Banned by administrator"):
     if not is_privileged_user(interaction.user, interaction.guild):
-        await interaction.response.send_message("🚫 Only Server Owner, Admins, and Moderators can ban players!", ephemeral=True)
+        await safe_send_interaction(interaction, "🚫 Only Server Owner, Admins, and Moderators can ban players!", ephemeral=True)
         return
-    await execute_server_command(f"ban {player} {reason}")
-    await interaction.response.send_message(f"🔨 **[Banned]** `{player}` has been banned from the server! (Reason: {reason})\nDispatched to <#{CONSOLE_CHANNEL_ID}>.", ephemeral=True)
+    clean_p = player.strip()
+    target_arg = f'"{clean_p}"' if " " in clean_p else clean_p
+    await execute_server_command(f"ban {target_arg} {reason}")
+    await safe_send_interaction(interaction, f"🔨 **[Banned]** `{clean_p}` has been banned from the server! (Reason: {reason})\nDispatched to <#{CONSOLE_CHANNEL_ID}>.", ephemeral=True)
 
 @bot.tree.command(name="unban", description="Owner/Admin/Mod only: Unban a player from the Minecraft server")
 @app_commands.describe(player="Minecraft player username")
 async def slash_unban(interaction: discord.Interaction, player: str):
     if not is_privileged_user(interaction.user, interaction.guild):
-        await interaction.response.send_message("🚫 Only Server Owner, Admins, and Moderators can unban players!", ephemeral=True)
+        await safe_send_interaction(interaction, "🚫 Only Server Owner, Admins, and Moderators can unban players!", ephemeral=True)
         return
-    await execute_server_command(f"pardon {player}")
-    await interaction.response.send_message(f"🕊️ **[Unbanned]** `{player}` has been pardoned.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.", ephemeral=True)
+    clean_p = player.strip()
+    target_arg = f'"{clean_p}"' if " " in clean_p else clean_p
+    await execute_server_command(f"pardon {target_arg}")
+    await safe_send_interaction(interaction, f"🕊️ **[Unbanned]** `{clean_p}` has been pardoned.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.", ephemeral=True)
 
 @bot.tree.command(name="unwhitelist", description="Owner/Admin/Mod only: Remove a player from the Minecraft whitelist")
 @app_commands.describe(player="Minecraft player username to remove")
 async def slash_unwhitelist(interaction: discord.Interaction, player: str):
     if not is_privileged_user(interaction.user, interaction.guild):
-        await interaction.response.send_message("🚫 Only Server Owner, Admins, and Moderators can remove whitelist!", ephemeral=True)
+        await safe_send_interaction(interaction, "🚫 Only Server Owner, Admins, and Moderators can remove whitelist!", ephemeral=True)
         return
     clean_p = player.strip()
     await execute_unwhitelist_command(clean_p)
     reg = load_whitelist_registry()
-    new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower() != clean_p.lower()}
+    new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower().lstrip(".") != clean_p.lower().lstrip(".")}
     save_whitelist_registry(new_reg)
-    await interaction.response.send_message(f"🗑️ **[Whitelist Removed]** `{clean_p}` removed from whitelist.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.", ephemeral=True)
+    if interaction.guild:
+        import sync_manager
+        for uid_str, udata in reg.items():
+            if udata.get("ign", "").lower().lstrip(".") == clean_p.lower().lstrip("."):
+                try:
+                    mem = interaction.guild.get_member(int(uid_str))
+                    if not mem:
+                        try:
+                            mem = await interaction.guild.fetch_member(int(uid_str))
+                        except Exception:
+                            pass
+                    if mem:
+                        asyncio.create_task(sync_manager.remove_single_member_sync(interaction.guild, mem))
+                except Exception:
+                    pass
+    await safe_send_interaction(interaction, f"🗑️ **[Whitelist Removed]** `{clean_p}` removed from whitelist.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.", ephemeral=True)
 
 @bot.tree.command(name="remember", description="Teach Tillu a fact, rule, or server setting to remember permanently")
 @app_commands.describe(fact="What should Tillu remember? (e.g. 'Server rules: No griefing' or 'End dimension opens on Sunday')")
@@ -2046,7 +2201,8 @@ async def slash_remember(interaction: discord.Interaction, fact: str):
             topic, clean_fact,
             author=f"{user.name} (Owner)" if author_is_owner else f"{user.name} (Staff)"
         )
-        await interaction.response.send_message(
+        await safe_send_interaction(
+            interaction,
             f"🧠 **Yaad rakh liya!**\n> *\"{clean_fact}\"*\nYeh permanent memory diary me save ho gaya aur GitHub se sync ho chuka hai! 🚀",
             ephemeral=True
         )
@@ -2062,7 +2218,8 @@ async def slash_remember(interaction: discord.Interaction, fact: str):
         view = MemoryApprovalView(topic, clean_fact, user.id, user.name, origin_channel_id=interaction.channel_id or 0)
         if mem_ch:
             await mem_ch.send(embed=embed, view=view)
-        await interaction.response.send_message(
+        await safe_send_interaction(
+            interaction,
             f"📩 **Aapki memory request review ke liye bhej di gayi hai!**\nAapki request (*\"{clean_fact}\"*) review ke liye bhej di gayi hai. Unke approve karte hi Tillu isse yaad rakh lega! 😄",
             ephemeral=True
         )
@@ -2071,7 +2228,7 @@ async def slash_remember(interaction: discord.Interaction, fact: str):
 async def slash_memories(interaction: discord.Interaction):
     all_mems = memory_mgr.get_all()
     if not all_mems:
-        await interaction.response.send_message("🧠 Tillu ki memory diary abhi khaali hai! Use `/remember` to add something.", ephemeral=True)
+        await safe_send_interaction(interaction, "🧠 Tillu ki memory diary abhi khaali hai! Use `/remember` to add something.", ephemeral=True)
         return
     embed = discord.Embed(
         title="🧠 Tillu Persistent Memory Diary",
@@ -2083,38 +2240,48 @@ async def slash_memories(interaction: discord.Interaction):
         author_str = v.get("updated_by", "Unknown")
         embed.add_field(name=f"📌 {k}", value=f"{val_str}\n*(Added by: {author_str})*", inline=False)
     embed.set_footer(text="GitHub Auto-Sync Active • avinash893/aalu-server-bot")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await safe_send_interaction(interaction, embed=embed, ephemeral=True)
 
 @bot.tree.command(name="tag", description="Owner/Admin/Mod only: Have Tillu tag or ping a user or role with a message")
 @app_commands.describe(target="The user or role mention to tag (e.g. @Gamer or @Admin)", message="Your message")
 async def slash_tag(interaction: discord.Interaction, target: str, message: str):
     if not is_privileged_user(interaction.user, interaction.guild):
-        await interaction.response.send_message("🚫 Sirf Server Owner, Admins aur Moderators hi mujhe kisi ko tag karne bol sakte hain!", ephemeral=True)
+        await safe_send_interaction(interaction, "🚫 Sirf Server Owner, Admins aur Moderators hi mujhe kisi ko tag karne bol sakte hain!", ephemeral=True)
         return
-    await interaction.channel.send(
-        f"📢 {target.strip()} — {message.strip()}\n*(Tagged by {interaction.user.mention})*",
-        allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False)
-    )
-    await interaction.response.send_message("✅ Tag message bhej diya!", ephemeral=True)
+    try:
+        await interaction.channel.send(
+            f"📢 {target.strip()} — {message.strip()}\n*(Tagged by {interaction.user.mention})*",
+            allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False)
+        )
+        await safe_send_interaction(interaction, "✅ Tag message bhej diya!", ephemeral=True)
+    except discord.Forbidden:
+        await safe_send_interaction(interaction, "🚫 I don't have permission to send messages or mentions in this channel!", ephemeral=True)
+    except Exception as e:
+        await safe_send_interaction(interaction, f"❌ Failed to send tag: {e}", ephemeral=True)
 
 @bot.tree.command(name="botcmd", description="Owner/Admin/Mod only: Have Tillu send a command to control or trigger another bot")
 @app_commands.describe(command="Exact bot command to run (e.g. '!tts hello' or '!play music')")
 async def slash_botcmd(interaction: discord.Interaction, command: str):
     if not is_privileged_user(interaction.user, interaction.guild):
-        await interaction.response.send_message("🚫 Sirf Server Owner aur Moderators hi mujhe doosre bots ko command dene bol sakte hain!", ephemeral=True)
+        await safe_send_interaction(interaction, "🚫 Sirf Server Owner aur Moderators hi mujhe doosre bots ko command dene bol sakte hain!", ephemeral=True)
         return
-    await interaction.channel.send(command.strip())
-    await interaction.response.send_message(f"🤖 Sent command `{command.strip()}` to <#{interaction.channel_id}>!", ephemeral=True)
+    try:
+        await interaction.channel.send(command.strip())
+        await safe_send_interaction(interaction, f"🤖 Sent command `{command.strip()}` to <#{interaction.channel_id}>!", ephemeral=True)
+    except discord.Forbidden:
+        await safe_send_interaction(interaction, "🚫 I don't have permission to send messages in this channel!", ephemeral=True)
+    except Exception as e:
+        await safe_send_interaction(interaction, f"❌ Failed to send bot command: {e}", ephemeral=True)
 
 @bot.tree.command(name="listbots", description="List all other bots currently active in this Discord server")
 async def slash_listbots(interaction: discord.Interaction):
     guild = interaction.guild
     if not guild:
-        await interaction.response.send_message("🚫 Server me hi use ho sakta hai!", ephemeral=True)
+        await safe_send_interaction(interaction, "🚫 Server me hi use ho sakta hai!", ephemeral=True)
         return
     bots = [m for m in guild.members if m.bot and m.id != (bot.user.id if bot.user else 0)]
     if not bots:
-        await interaction.response.send_message("🤖 Is server me koi doosra bot nahi mila!", ephemeral=True)
+        await safe_send_interaction(interaction, "🤖 Is server me koi doosra bot nahi mila!", ephemeral=True)
         return
     embed = discord.Embed(
         title=f"🤖 Bots in {guild.name}",
@@ -2124,7 +2291,7 @@ async def slash_listbots(interaction: discord.Interaction):
     for b in bots:
         embed.add_field(name=f"🤖 {b.display_name}", value=f"Tag: {b.mention}\nID: `{b.id}`", inline=True)
     embed.set_footer(text="Owner & Moderators can ask Tillu to control these bots via chat or /botcmd")
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await safe_send_interaction(interaction, embed=embed, ephemeral=True)
 
 @bot.tree.command(name="help", description="Show Tillu bot commands & features")
 async def slash_help(interaction: discord.Interaction):
@@ -2143,7 +2310,7 @@ async def slash_help(interaction: discord.Interaction):
     embed.add_field(name="🎚️ Live Server Console", value=f"Owner, Admins & Mods can type Minecraft commands directly in <#{CONSOLE_CHANNEL_ID}> anytime without visiting the website panel!", inline=False)
     embed.add_field(name="⏱️ Cooldown", value="20s cooldown for members • **0s cooldown** for Owner, Admins & Mods", inline=False)
     embed.set_footer(text="Tillu • 24/7 Always-Online Active")
-    await interaction.response.send_message(embed=embed, view=ServerControlView(), ephemeral=True)
+    await safe_send_interaction(interaction, embed=embed, view=ServerControlView(), ephemeral=True)
 
 # ── TEXT COMMANDS ────────────────────────────────────────────────────────────
 @bot.command(name="pause")
@@ -2236,14 +2403,14 @@ async def cmd_send_claims(ctx, *, target_account: str = ""):
     entry = reg.get(uid, {})
     linked_ign = entry.get("ign")
 
-    target_ign = target_account.strip()
+    target_ign = re.sub(r'^(?:to\s+)', '', target_account.strip(), flags=re.IGNORECASE).strip()
     if not target_ign or target_ign.lower() in ["my account", "me", "self", "my"]:
         if not linked_ign:
             return await ctx.send(f"❌ {ctx.author.mention}, tumhara koi account linked nahi hai! Apna IGN do: `!sendclaims <account_name>` ya pehle `!whitelist <ign>` karo.")
         target_ign = linked_ign
 
     msg_wait = await ctx.send(f"⏳ Delivering vault claims to `{target_ign}` via Minecraft console...")
-    success, items, msg = rewards_manager.send_claims_to_account(ctx.author.id, target_ign, panel_send_command)
+    success, items, msg = await asyncio.to_thread(rewards_manager.send_claims_to_account, ctx.author.id, target_ign, panel_send_command)
     if not success:
         return await msg_wait.edit(content=f"{ctx.author.mention} {msg}")
 
@@ -2252,7 +2419,7 @@ async def cmd_send_claims(ctx, *, target_account: str = ""):
         description=f"All claims have been transferred to **`{target_ign}`** in Minecraft!",
         color=0x2ECC71
     )
-    embed.set_thumbnail(url=f"https://mc-heads.net/avatar/{target_ign}/128")
+    embed.set_thumbnail(url=f"https://mc-heads.net/avatar/{target_ign.replace(' ', '%20')}/128")
     items_list = "\n".join(f"• {it['emoji']} **{it['name']}** (`{it['rarity']}`)" for it in items)
     embed.add_field(name="📦 Delivered Items", value=items_list or "Items delivered", inline=False)
     embed.set_footer(text="Tillu • Minecraft MCP Cloud Rewards")
@@ -2378,8 +2545,10 @@ async def cmd_ban(ctx, player: str = None, *, reason: str = "Banned by administr
     if not player:
         await ctx.send("❌ Usage: `!ban <player> [reason]`")
         return
-    await execute_server_command(f"ban {player} {reason}")
-    await ctx.send(f"🔨 **[Banned]** `{player}` has been banned from the server! (Reason: {reason})\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
+    clean_p = player.strip()
+    target_arg = f'"{clean_p}"' if " " in clean_p else clean_p
+    await execute_server_command(f"ban {target_arg} {reason}")
+    await ctx.send(f"🔨 **[Banned]** `{clean_p}` has been banned from the server! (Reason: {reason})\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
 
 @bot.command(name="unban", aliases=["pardon"])
 async def cmd_unban(ctx, player: str = None):
@@ -2389,8 +2558,10 @@ async def cmd_unban(ctx, player: str = None):
     if not player:
         await ctx.send("❌ Usage: `!unban <player>`")
         return
-    await execute_server_command(f"pardon {player}")
-    await ctx.send(f"🕊️ **[Unbanned]** `{player}` has been pardoned on the server.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
+    clean_p = player.strip()
+    target_arg = f'"{clean_p}"' if " " in clean_p else clean_p
+    await execute_server_command(f"pardon {target_arg}")
+    await ctx.send(f"🕊️ **[Unbanned]** `{clean_p}` has been pardoned on the server.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
 
 @bot.command(name="kick")
 async def cmd_kick(ctx, player: str = None, *, reason: str = "Kicked by administrator"):
@@ -2400,8 +2571,10 @@ async def cmd_kick(ctx, player: str = None, *, reason: str = "Kicked by administ
     if not player:
         await ctx.send("❌ Usage: `!kick <player> [reason]`")
         return
-    await execute_server_command(f"kick {player} {reason}")
-    await ctx.send(f"👢 **[Kicked]** `{player}` has been kicked from the server!\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
+    clean_p = player.strip()
+    target_arg = f'"{clean_p}"' if " " in clean_p else clean_p
+    await execute_server_command(f"kick {target_arg} {reason}")
+    await ctx.send(f"👢 **[Kicked]** `{clean_p}` has been kicked from the server!\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
 
 @bot.command(name="unwhitelist", aliases=["wlremove", "removewhitelist"])
 async def cmd_unwhitelist(ctx, player: str = None):
@@ -2414,17 +2587,23 @@ async def cmd_unwhitelist(ctx, player: str = None):
     clean_p = player.strip()
     await execute_unwhitelist_command(clean_p)
     reg = load_whitelist_registry()
-    new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower() != clean_p.lower()}
+    new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower().lstrip(".") != clean_p.lower().lstrip(".")}
     save_whitelist_registry(new_reg)
-    import sync_manager
-    for uid_str, udata in reg.items():
-        if udata.get("ign", "").lower() == clean_p.lower():
-            try:
-                mem = ctx.guild.get_member(int(uid_str))
-                if mem:
-                    asyncio.create_task(sync_manager.remove_single_member_sync(ctx.guild, mem))
-            except Exception:
-                pass
+    if ctx.guild:
+        import sync_manager
+        for uid_str, udata in reg.items():
+            if udata.get("ign", "").lower().lstrip(".") == clean_p.lower().lstrip("."):
+                try:
+                    mem = ctx.guild.get_member(int(uid_str))
+                    if not mem:
+                        try:
+                            mem = await ctx.guild.fetch_member(int(uid_str))
+                        except Exception:
+                            pass
+                    if mem:
+                        asyncio.create_task(sync_manager.remove_single_member_sync(ctx.guild, mem))
+                except Exception:
+                    pass
     await ctx.send(f"🗑️ **[Whitelist Removed]** `{clean_p}` has been removed from the whitelist.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
 
 
@@ -2709,13 +2888,17 @@ async def handle_players_command(channel, user=None):
 
 @bot.event
 async def on_message(message: discord.Message):
+    # Only ignore Tillu himself to prevent self-looping (allow access/interaction with other bots)
+    if bot.user and message.author.id == bot.user.id:
+        return
+
     # ── CONSOLE CHANNEL: Intercept & Format 'whitelist list' output ───────────
     raw_text = message.content or ""
     if not raw_text and message.embeds:
         raw_text = " ".join([e.description or "" for e in message.embeds if e.description])
 
     if "whitelisted player" in raw_text.lower():
-        if message.channel.id == CONSOLE_CHANNEL_ID or (bot.user and message.author.id == bot.user.id):
+        if message.channel.id == CONSOLE_CHANNEL_ID:
             embed = format_whitelisted_players_embed(raw_text)
             if embed:
                 try:
@@ -2727,11 +2910,6 @@ async def on_message(message: discord.Message):
                 except Exception as se:
                     logging.error(f"[Whitelist Formatter] Error sending embed: {se}")
                 return
-
-    # Only ignore Tillu himself to prevent self-looping (allow access/interaction with other bots)
-
-    if bot.user and message.author.id == bot.user.id:
-        return
 
     # Record chat activity for Minecraft Chat Drops
     if not message.author.bot:
@@ -2961,7 +3139,7 @@ async def on_message(message: discord.Message):
     if is_whitelist_channel:
         clean_word = content.strip().replace('"', '').replace("'", "").replace("`", "")
         if (
-            re.match(r'^[a-zA-Z0-9_.*]{3,20}$', clean_word)
+            re.match(r'^[a-zA-Z0-9_.* ]{3,20}$', clean_word)
             and not any(w in clean_word.lower() for w in ["hi", "hey", "hello", "tillu", "help", "kya", "kaise", "what", "bro", "bhai", "join"])
         ):
             try:

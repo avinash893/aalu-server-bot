@@ -9,9 +9,12 @@ import json
 import time
 import random
 import logging
+import threading
 from typing import Tuple, Dict, Any, Optional
 
 logger = logging.getLogger("TilluChatDrops")
+
+_lock = threading.Lock()
 
 REWARDS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "chat_rewards.json")
 CLAIM_COOLDOWN_SECONDS = 7200  # 2 hours cooldown between free drops
@@ -117,21 +120,25 @@ DROP_TABLE = [
 
 
 def _load_data() -> dict:
-    if os.path.exists(REWARDS_FILE):
-        try:
-            with open(REWARDS_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
+    with _lock:
+        if os.path.exists(REWARDS_FILE):
+            try:
+                with open(REWARDS_FILE, "r", encoding="utf-8-sig") as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
 
 
 def _save_data(data: dict):
-    try:
-        with open(REWARDS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        logger.error(f"Failed to save rewards data: {e}")
+    with _lock:
+        try:
+            tmp_path = REWARDS_FILE + ".tmp"
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, REWARDS_FILE)
+        except Exception as e:
+            logger.error(f"Failed to save rewards data: {e}")
 
 
 def record_chat_activity(user_id: int):
@@ -246,20 +253,35 @@ def send_claims_to_account(user_id: int, target_ign: str, send_command_fn) -> Tu
 
     delivered = []
     failed = []
+    target_arg = f'"{clean_ign}"' if " " in clean_ign else clean_ign
 
     for item in pending:
-        give_cmd = f"give {clean_ign} {item['cmd']}"
+        give_cmd = f"give {target_arg} {item['cmd']}"
         ok, out = send_command_fn(give_cmd)
-        if ok:
-            delivered.append(item)
+        if not ok:
+            # Fallback to alternate prefix (Bedrock/Floodgate . prefix or vice-versa)
+            if clean_ign.startswith("."):
+                alt_raw = clean_ign[1:]
+                alt_arg = f'"{alt_raw}"' if " " in alt_raw else alt_raw
+            else:
+                alt_raw = f".{clean_ign}"
+                alt_arg = f'"{alt_raw}"' if " " in alt_raw else alt_raw
+            alt_give = f"give {alt_arg} {item['cmd']}"
+            ok_alt, _ = send_command_fn(alt_give)
+            if ok_alt:
+                ok = True
+                target_arg = alt_arg
+                delivered.append(item)
+            else:
+                failed.append((item, out))
         else:
-            failed.append((item, out))
+            delivered.append(item)
 
     if not delivered and failed:
         return False, [], f"⚠️ Server pe items deliver nahi hue: `{failed[0][1]}`. Kya Minecraft server online hai?"
 
     try:
-        title_cmd = f'title {clean_ign} actionbar {{"text":"🎁 Delivered {len(delivered)} Discord claims!","color":"gold"}}'
+        title_cmd = f'title {target_arg} actionbar {{"text":"🎁 Delivered {len(delivered)} Discord claims!","color":"gold"}}'
         send_command_fn(title_cmd)
     except Exception:
         pass
