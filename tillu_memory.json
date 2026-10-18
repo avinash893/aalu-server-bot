@@ -1,6 +1,6 @@
 {
-  "updated_at": "2026-10-18T00:50:55Z",
-  "count": 17,
+  "updated_at": "2026-10-18T00:54:15Z",
+  "count": 18,
   "memories": {
     "server_owner_is_avinash_aalu": {
       "topic": "server_owner_is_avinash_aalu",
@@ -103,6 +103,12 @@
       "content": "that",
       "updated_by": "uniqueumar114_29972 (Staff)",
       "updated_at": "2026-10-18 00:50:55 UTC"
+    },
+    "legacy_ip": {
+      "topic": "legacy_ip",
+      "content": "legacy-7.hexacraft.fun:25587",
+      "updated_by": "uniqueumar114_29972 (Staff)",
+      "updated_at": "2026-10-18 00:54:15 UTC"
     }
   }
 }
