@@ -1,6 +1,6 @@
 {
-  "updated_at": "2026-10-18T00:54:15Z",
-  "count": 18,
+  "updated_at": "2026-10-18T05:27:45Z",
+  "count": 15,
   "memories": {
     "server_owner_is_avinash_aalu": {
       "topic": "server_owner_is_avinash_aalu",
@@ -30,7 +30,7 @@
       "topic": "server_ip_update",
       "content": "legacy-7.hexacraft.fun:25587",
       "updated_by": "avinashshah (Owner)",
-      "updated_at": "2026-10-10 03:01:57 UTC"
+      "updated_at": "2026-10-18 05:27:45 UTC"
     },
     "user_memory": {
       "topic": "user_memory",
@@ -82,33 +82,15 @@
     },
     "server_ip_final_update": {
       "topic": "server_ip_final_update",
-      "content": "The final and correct server IP is noi7.visihost.in:25588",
+      "content": "The final, permanent, and only correct Minecraft server IP is legacy-7.hexacraft.fun:25587 (Port: 25587) for both Java & Bedrock. Any old IP like visihost or port 25588 is completely wrong and obsolete.",
       "updated_by": "avinashshah (Owner)",
-      "updated_at": "2026-10-11 17:54:38 UTC"
+      "updated_at": "2026-10-18 05:27:45 UTC"
     },
     "tillu_stop_start_mode": {
       "topic": "tillu_stop_start_mode",
       "content": "When Avinash (Owner) says \"tillu stop\", Tillu will not reply to anyone (not even Avinash). When Avinash says \"tillu start\", Tillu resumes replying to everyone.",
       "updated_by": "avinashshah (Owner)",
       "updated_at": "2026-10-13 01:00:19 UTC"
-    },
-    "server_ip_old": {
-      "topic": "server_ip_old",
-      "content": "legacy-7.hexacraft.fun:25587",
-      "updated_by": "avinashshah (Owner)",
-      "updated_at": "2026-10-17 23:07:54 UTC"
-    },
-    "that": {
-      "topic": "that",
-      "content": "that",
-      "updated_by": "uniqueumar114_29972 (Staff)",
-      "updated_at": "2026-10-18 00:50:55 UTC"
-    },
-    "legacy_ip": {
-      "topic": "legacy_ip",
-      "content": "legacy-7.hexacraft.fun:25587",
-      "updated_by": "uniqueumar114_29972 (Staff)",
-      "updated_at": "2026-10-18 00:54:15 UTC"
     }
   }
 }
