@@ -82,7 +82,7 @@
     },
     "server_ip_final_update": {
       "topic": "server_ip_final_update",
-      "content": "The final, permanent, and only correct Minecraft server IP is legacy-7.hexacraft.fun:25587 (Port: 25587) for both Java & Bedrock. Any old IP like visihost or port 25588 is completely wrong and obsolete.",
+      "content": "The final, permanent, and only correct Minecraft server IP is legacy-7.hexacraft.fun:25587 (Port: 25587) for both Java and Bedrock crossplay.",
       "updated_by": "avinashshah (Owner)",
       "updated_at": "2026-10-18 05:27:45 UTC"
     },
