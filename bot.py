@@ -172,15 +172,31 @@ rule_mgr = RuleManager(
 # ── DYNAMIC PROMPT & DISCORD ACTION ENGINES ─────────────────────────────────
 from prompt_manager import PromptManager
 from discord_action_manager import parse_and_execute_discord_action
+from context_classifier import classify_request, TargetSystem, ClassificationResult
+from bot_orchestrator import BotOrchestrator
+from self_reflection import TaskTelemetryLogger, SelfReflectionEngine
 
 prompt_mgr = PromptManager(
     token=os.environ.get("GITHUB_TOKEN", ""),
     repo=os.environ.get("GITHUB_REPO", "avinash893/aalu-server-bot")
 )
 
-# ── USER CONTEXT WINDOW (Rolling 10 Chats per User) ──────────────────────────
+bot_orch = BotOrchestrator(
+    token=os.environ.get("GITHUB_TOKEN", ""),
+    repo=os.environ.get("GITHUB_REPO", "avinash893/aalu-server-bot")
+)
 
-MAX_USER_HISTORY = 10
+telemetry = TaskTelemetryLogger()
+
+reflection_engine = SelfReflectionEngine(
+    telemetry=telemetry,
+    token=os.environ.get("GITHUB_TOKEN", ""),
+    repo=os.environ.get("GITHUB_REPO", "avinash893/aalu-server-bot")
+)
+
+# ── EXPANDED USER CONTEXT WINDOW (Rolling 25 Chats per User - Leveraging High RAM) ──
+
+MAX_USER_HISTORY = 25
 user_context_windows: dict[int, deque] = {}
 
 def get_user_context(user_id: int) -> list[dict]:
@@ -604,6 +620,17 @@ ROLES & ACTIONS:
   When ANY user asks you to start, turn on, boot, or run the server:
   FIRST LINE: START_INTENT: start
   Followed by: "Bhai server start karne ke liye HexaCraft panel pe jao aur **Start** daba do: https://panel.hexacraft.fun/server/14c2ebb6 🚀 (Har 10 minute me server auto-start bhi hota hai!)"
+
+- MINECRAFT VS DISCORD STRICT SEPARATION (CRITICAL):
+  * MINECRAFT INTENT (Target: Paper Game Server):
+    - Console commands, in-game bans/kicks/ops, in-game items, TPS, coordinates, oneblock, SMP, whitelist requests.
+    - Ban or Kick for Minecraft ALWAYS targets an in-game IGN (e.g. "ban Notch" or "kick Steve123").
+    - Emission: ADMIN_INTENT: <exact_minecraft_console_command>
+  * DISCORD INTENT (Target: Discord Community Guild):
+    - Creating/deleting/renaming channels, roles, categories, purging chat messages, timeouts, Discord bans, Discord kicks, Discord backups.
+    - Ban or Kick for Discord ALWAYS targets a Discord user (@mention or numeric ID like "ban @troll" or "kick @spammer").
+    - Emission: DISCORD_INTENT: <action_name> <parameters> (e.g., DISCORD_INTENT: purge 10, DISCORD_INTENT: timeout @user 10, DISCORD_INTENT: ban @user, DISCORD_INTENT: create_role VIP)
+  * NEVER cross-wire these systems: Never send Discord moderation or channel commands to the Minecraft server console!
 
 - SERVER OWNER & ADMIN COMMANDS (MINECRAFT ONLY):
   When an Admin or Owner tells you to ban, unban, kick, remove from whitelist, op, or run console command on the MINECRAFT game server:
@@ -1140,11 +1167,21 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
             f"If the user asks, tell them the server is sleeping/offline, and they can ask you to start it or use /start!"
         )
 
-    bots_summary = ""
-    if target_guild:
+    bots_summary = bot_orch.format_inter_bot_context()
+    if bots_summary:
+        bots_summary = f"{bots_summary}\n\n"
+    elif target_guild:
         other_bots = [m.name for m in target_guild.members if m.bot and m.id != (bot.user.id if bot.user else 0)]
         if other_bots:
-            bots_summary = f"[OTHER BOTS ACTIVE IN THIS SERVER]: {', '.join(other_bots)}\n(Only Server Owner & Moderators can instruct you to control these bots).\n"
+            bots_summary = f"[OTHER BOTS ACTIVE IN THIS SERVER]: {', '.join(other_bots)}\n(Only Server Owner & Moderators can instruct you to control these bots).\n\n"
+
+    # Multi-Turn Conversation Memory (Leveraging high RAM capacity)
+    conversation_history = ""
+    if user_id:
+        history_items = get_user_context(user_id)
+        if history_items:
+            h_lines = [f"[{h['role'].upper()}]: {h['text']}" for h in history_items[-8:]]
+            conversation_history = "[RECENT MULTI-TURN CONVERSATION HISTORY]:\n" + "\n".join(h_lines) + "\n\n"
 
     memory_context = memory_mgr.get_formatted_context()
     prompt_ext = prompt_mgr.get_formatted_prompt_extension()
@@ -1155,6 +1192,7 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
         f"{memory_context}\n\n"
         f"{live_telemetry}\n\n"
         f"{bots_summary}"
+        f"{conversation_history}"
         f"{user_role_tag}\n\n"
         f"Input from {user_name}:\n{prompt}\n\n"
         f"Tillu's Response:"
@@ -1884,14 +1922,52 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
     # 2. Enrich query with link metadata if links/videos are present
     query = await enrich_query_with_links(query)
 
+    # Context classification pre-check to distinguish Minecraft vs Discord vs Inter-Bot
+    ch_name = getattr(getattr(interaction_or_ctx, 'channel', None), 'name', '')
+    ch_id = getattr(getattr(interaction_or_ctx, 'channel', None), 'id', 0)
+    has_mention = bool(getattr(msg_obj, "mentions", [])) if msg_obj else False
+    known_bots = bot_orch.get_known_bot_names()
+    classification = classify_request(query, channel_name=ch_name, channel_id=ch_id, has_discord_mention=has_mention, known_bot_names=known_bots)
+    logging.info(f"[Classifier] Query: '{query[:40]}' -> System: {classification.system.value} | Action: {classification.action} (conf: {classification.confidence:.2f})")
+
+    query_with_classifier = query
+    if classification.confidence >= 0.75:
+        query_with_classifier = (
+            f"[SYSTEM INTENT ROUTER GUIDANCE]:\n"
+            f"Target System: {classification.system.value} | Action: {classification.action}\n"
+            f"Guidance: {classification.reasoning}\n\n"
+            f"{query}"
+        )
+
     # Call LLM in thread with user ID, admin context, and owner status
     user_id = getattr(user, "id", 0)
-    answer = await asyncio.to_thread(query_gemini, query, str(user), user_id, is_admin, author_is_owner, target_guild)
+    answer = await asyncio.to_thread(query_gemini, query_with_classifier, str(user), user_id, is_admin, author_is_owner, target_guild)
     answer = clean_thought_process(answer)
     if not answer:
         answer = "Haan bhai! Tillu hazir hai, bolo kya scene hai? 🚀"
 
-    # 0. Check for START_INTENT (Start server via MCP Panel)
+    # 0. Check for DISCORD_INTENT (Discord roles, channels, purge, timeouts, Discord bans)
+    if "DISCORD_INTENT:" in answer:
+        match = re.search(r'DISCORD_INTENT:\s*([^\n\r]+)', answer)
+        if match:
+            d_cmd = match.group(1).strip()
+            clean_reply = answer.replace(match.group(0), "").strip()
+            if not is_admin:
+                await reply_fn(content="🚫 Discord server management aur moderation sirf Server Owner aur Admins ke paas hai!")
+                telemetry.log_task(query, str(user), user_id, getattr(getattr(interaction_or_ctx, 'channel', None), 'name', 'direct'), getattr(getattr(interaction_or_ctx, 'channel', None), 'id', 0), TargetSystem.DISCORD.value, "discord_intent_denied", success=False, error_message="Permission denied")
+                return
+            if msg_obj and target_guild:
+                handled, d_resp = await parse_and_execute_discord_action(msg_obj, user, target_guild, d_cmd)
+                if handled and d_resp:
+                    await reply_fn(content=f"{d_resp}\n{clean_reply}" if clean_reply else d_resp)
+                    telemetry.log_task(query, str(user), user_id, getattr(getattr(interaction_or_ctx, 'channel', None), 'name', 'direct'), getattr(getattr(interaction_or_ctx, 'channel', None), 'id', 0), TargetSystem.DISCORD.value, d_cmd, success=True, response_preview=d_resp)
+                    return
+            if clean_reply:
+                await reply_fn(content=clean_reply)
+            telemetry.log_task(query, str(user), user_id, getattr(getattr(interaction_or_ctx, 'channel', None), 'name', 'direct'), getattr(getattr(interaction_or_ctx, 'channel', None), 'id', 0), TargetSystem.DISCORD.value, d_cmd, success=True, response_preview=clean_reply)
+            return
+
+    # 1. Check for START_INTENT (Start server via MCP Panel)
     if "START_INTENT:" in answer:
         match = re.search(r'START_INTENT:\s*([^\n\r]+)', answer)
         if match:
@@ -1905,19 +1981,27 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
                 except Exception:
                     pass
             await handle_start_request(interaction_or_ctx, user, guild=target_guild)
+            telemetry.log_task(query, str(user), user_id, getattr(getattr(interaction_or_ctx, 'channel', None), 'name', 'direct'), getattr(getattr(interaction_or_ctx, 'channel', None), 'id', 0), TargetSystem.MINECRAFT.value, "server_start", success=True)
             return
 
-    # 1. Check for ADMIN_INTENT (Console / Moderation commands for Admin/Owner)
+    # 2. Check for ADMIN_INTENT (Console / Moderation commands for Admin/Owner)
     if "ADMIN_INTENT:" in answer:
         match = re.search(r'ADMIN_INTENT:\s*([^\n\r]+)', answer)
         if match:
             cmd = match.group(1).strip()
             # GUARD: Never send Discord management actions to Minecraft server console!
-            if any(w in cmd.lower() for w in ["purge", "unassignrole", "role", "channel", "/discord", "clear", "delete message"]):
-                logging.info(f"[AdminIntent Guard] Blocked misrouted Discord action from console: {cmd}")
+            if any(w in cmd.lower() for w in ["purge", "unassignrole", "role", "channel", "/discord", "clear", "delete message", "timeout", "kick @", "ban @", "mute @"]):
+                logging.info(f"[AdminIntent Guard] Rerouting Discord action from Minecraft console: {cmd}")
+                if msg_obj and target_guild and is_admin:
+                    handled, d_resp = await parse_and_execute_discord_action(msg_obj, user, target_guild, cmd)
+                    if handled and d_resp:
+                        await reply_fn(content=d_resp)
+                        telemetry.log_task(query, str(user), user_id, getattr(getattr(interaction_or_ctx, 'channel', None), 'name', 'direct'), getattr(getattr(interaction_or_ctx, 'channel', None), 'id', 0), TargetSystem.DISCORD.value, cmd, success=True, response_preview=d_resp)
+                        return
                 clean_reply = answer.replace(match.group(0), "").strip()
                 if clean_reply:
                     await reply_fn(content=clean_reply)
+                telemetry.log_task(query, str(user), user_id, getattr(getattr(interaction_or_ctx, 'channel', None), 'name', 'direct'), getattr(getattr(interaction_or_ctx, 'channel', None), 'id', 0), TargetSystem.DISCORD.value, cmd, success=True)
                 return
 
             if not is_admin:
@@ -2064,6 +2148,22 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
         else:
             for c in chunks:
                 await reply_fn(content=c)
+
+    # Record telemetry for general chat completion
+    try:
+        telemetry.log_task(
+            query=query,
+            user_name=str(user),
+            user_id=user_id,
+            channel_name=getattr(getattr(interaction_or_ctx, 'channel', None), 'name', 'direct'),
+            channel_id=getattr(getattr(interaction_or_ctx, 'channel', None), 'id', 0),
+            system_target=classification.system.value if 'classification' in locals() else TargetSystem.GENERAL_CHAT.value,
+            action=classification.action if 'classification' in locals() else "chat_response",
+            success=True,
+            response_preview=answer[:120]
+        )
+    except Exception:
+        pass
 
 # ── SLASH COMMANDS ───────────────────────────────────────────────────────────
 @bot.tree.command(name="pause", description="Pause Tillu so he stops responding to chat messages")
@@ -2273,25 +2373,75 @@ async def slash_botcmd(interaction: discord.Interaction, command: str):
     except Exception as e:
         await safe_send_interaction(interaction, f"❌ Failed to send bot command: {e}", ephemeral=True)
 
-@bot.tree.command(name="listbots", description="List all other bots currently active in this Discord server")
+@bot.tree.command(name="listbots", description="List all other bots currently active and their learned usage skills")
 async def slash_listbots(interaction: discord.Interaction):
     guild = interaction.guild
     if not guild:
         await safe_send_interaction(interaction, "🚫 Server me hi use ho sakta hai!", ephemeral=True)
         return
-    bots = [m for m in guild.members if m.bot and m.id != (bot.user.id if bot.user else 0)]
-    if not bots:
-        await safe_send_interaction(interaction, "🤖 Is server me koi doosra bot nahi mila!", ephemeral=True)
-        return
     embed = discord.Embed(
-        title=f"🤖 Bots in {guild.name}",
-        description=f"Total other bots detected: **{len(bots)}**",
-        color=0x3498DB
+        title=f"🤖 Autonomous Bot Directory ({guild.name})",
+        description="Tillu learns the capabilities of every bot in this server and can collaborate with them:",
+        color=0x3498DB,
+        timestamp=discord.utils.utcnow()
     )
-    for b in bots:
-        embed.add_field(name=f"🤖 {b.display_name}", value=f"Tag: {b.mention}\nID: `{b.id}`", inline=True)
-    embed.set_footer(text="Owner & Moderators can ask Tillu to control these bots via chat or /botcmd")
+    if bot_orch.bots:
+        for b_id, b_data in list(bot_orch.bots.items())[:15]:
+            name = b_data.get("name", "Bot")
+            cat = b_data.get("category", "Integration")
+            prefix = ", ".join(b_data.get("prefix", ["!"]))
+            skills = ", ".join(b_data.get("skills", [])[:3]) or "Standard commands"
+            embed.add_field(
+                name=f"🤖 {name} (`{cat}`)",
+                value=f"**Prefix:** `{prefix}`\n**Skills:** `{skills}`\n**How to command:** `tillu tell {name} to <action>`",
+                inline=True
+            )
+    else:
+        other_bots = [m for m in guild.members if m.bot and m.id != (bot.user.id if bot.user else 0)]
+        for b in other_bots[:15]:
+            embed.add_field(name=f"🤖 {b.display_name}", value=f"Tag: {b.mention}\nID: `{b.id}`", inline=True)
+
+    embed.set_footer(text="Tillu Inter-Bot Orchestrator • Synced with GitHub (avinash893/aalu-server-bot)")
     await safe_send_interaction(interaction, embed=embed, ephemeral=True)
+
+@bot.tree.command(name="audit", description="Trigger an immediate self-reflection audit of Tillu's recent tasks, errors, and intent routing")
+async def slash_audit(interaction: discord.Interaction):
+    if not is_privileged_user(interaction.user, interaction.guild):
+        await safe_send_interaction(interaction, "🚫 Sirf Server Owner aur Moderators hi self-audit trigger kar sakte hain!", ephemeral=True)
+        return
+    if not interaction.response.is_done():
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            pass
+
+    def _llm_reflect(prompt_text):
+        return query_gemini(prompt_text, "TilluAuditor", is_admin=True, is_owner_user=True)
+
+    res = await reflection_engine.execute_audit_cycle(
+        prompt_mgr=prompt_mgr,
+        rule_mgr=rule_mgr,
+        llm_reflection_fn=_llm_reflect
+    )
+    embed = discord.Embed(
+        title=f"🧠 Tillu Self-Audit Report #{reflection_engine.audit_counter}",
+        description=(
+            f"**Task Performance Diagnostics:**\n"
+            f"• Tasks Evaluated: **{res.get('total_tasks', 0)}**\n"
+            f"• Success Rate: **{res.get('success_rate', 100.0)}%** (`{res.get('success_count', 0)}` OK / `{res.get('fail_count', 0)}` Failed)\n"
+            f"• Classification Routing: `{json.dumps(res.get('system_breakdown', {}))}`\n\n"
+            f"**AI Diagnostics & Self-Improvement:**\n> {res.get('ai_reflection', 'Baseline stable')[:800]}"
+        ),
+        color=0x2ECC71 if res.get('success_rate', 100.0) >= 90 else 0xE67E22,
+        timestamp=discord.utils.utcnow()
+    )
+    if res.get("auto_learned_improvement"):
+        embed.add_field(name="🚀 Auto-Learned Robustness Rule", value=f"`{res.get('auto_learned_improvement')}`", inline=False)
+    embed.set_footer(text="5x Daily Autonomous Evolution Loop • Synced to GitHub")
+    if interaction.response.is_done():
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="help", description="Show Tillu bot commands & features")
 async def slash_help(interaction: discord.Interaction):
@@ -2313,6 +2463,37 @@ async def slash_help(interaction: discord.Interaction):
     await safe_send_interaction(interaction, embed=embed, view=ServerControlView(), ephemeral=True)
 
 # ── TEXT COMMANDS ────────────────────────────────────────────────────────────
+@bot.command(name="audit", aliases=["selfaudit", "auditreport"])
+async def cmd_audit(ctx):
+    if not is_privileged_user(ctx.author, ctx.guild):
+        return await ctx.send("🚫 Sirf Server Owner aur Moderators hi self-audit trigger kar sakte hain!")
+
+    msg = await ctx.send("🔍 **Tillu Self-Audit Initiated...** Analyzing recent tasks and error patterns...")
+    def _llm_reflect(prompt_text):
+        return query_gemini(prompt_text, "TilluAuditor", is_admin=True, is_owner_user=True)
+
+    res = await reflection_engine.execute_audit_cycle(
+        prompt_mgr=prompt_mgr,
+        rule_mgr=rule_mgr,
+        llm_reflection_fn=_llm_reflect
+    )
+    embed = discord.Embed(
+        title=f"🧠 Tillu Self-Audit Report #{reflection_engine.audit_counter}",
+        description=(
+            f"**Task Performance Diagnostics:**\n"
+            f"• Tasks Evaluated: **{res.get('total_tasks', 0)}**\n"
+            f"• Success Rate: **{res.get('success_rate', 100.0)}%** (`{res.get('success_count', 0)}` OK / `{res.get('fail_count', 0)}` Failed)\n"
+            f"• Classification Routing: `{json.dumps(res.get('system_breakdown', {}))}`\n\n"
+            f"**AI Diagnostics & Self-Improvement:**\n> {res.get('ai_reflection', 'Baseline stable')[:800]}"
+        ),
+        color=0x2ECC71 if res.get('success_rate', 100.0) >= 90 else 0xE67E22,
+        timestamp=discord.utils.utcnow()
+    )
+    if res.get("auto_learned_improvement"):
+        embed.add_field(name="🚀 Auto-Learned Robustness Rule", value=f"`{res.get('auto_learned_improvement')}`", inline=False)
+    embed.set_footer(text="5x Daily Autonomous Evolution Loop • Synced to GitHub")
+    await msg.edit(content=None, embed=embed)
+
 @bot.command(name="pause")
 async def cmd_pause(ctx):
     global TILLU_PAUSED
@@ -2680,6 +2861,36 @@ async def delayed_video_reply(message: discord.Message):
 @bot.event
 async def on_member_join(member: discord.Member):
     guild = member.guild
+
+    # ── AUTONOMOUS BOT DISCOVERY & CAPABILITY LEARNING ───────────────────────
+    if member.bot:
+        try:
+            logging.info(f"[New Bot Joined] Detected bot '{member.name}' ({member.id}) in guild '{guild.name}'. Analyzing...")
+            profile = await bot_orch.analyze_and_register_bot(member, guild)
+            bot_orch.bots[str(member.id)] = profile
+            bot_orch.save()
+
+            update_ch = await get_or_create_update_channel(guild)
+            if update_ch:
+                embed = discord.Embed(
+                    title=f"🤖 New Discord Bot Integrated: {member.name}",
+                    description=(
+                        f"Tillu has autonomously analyzed `{member.name}` ({member.mention}):\n\n"
+                        f"• **Category:** `{profile.get('category')}`\n"
+                        f"• **Command Prefix:** `{', '.join(profile.get('prefix', ['!']))}`\n"
+                        f"• **Capabilities Learned:** {', '.join(profile.get('skills', [])[:5]) or 'Utility commands'}\n"
+                        f"• **Summary:** {profile.get('description')}\n\n"
+                        f"Tillu can now collaborate with and control `{member.name}`! Use `tillu tell {member.name} to <action>` 🚀"
+                    ),
+                    color=0x2ECC71,
+                    timestamp=discord.utils.utcnow()
+                )
+                embed.set_thumbnail(url=member.display_avatar.url)
+                embed.set_footer(text="Tillu Autonomous Bot Orchestrator • Synced to GitHub")
+                await update_ch.send(embed=embed)
+        except Exception as be:
+            logging.error(f"[on_member_join Bot Analysis] Error: {be}")
+        return
     channel = guild.system_channel
     if not channel or not channel.permissions_for(guild.me).send_messages:
         for ch in guild.text_channels:
@@ -3117,6 +3328,38 @@ async def on_message(message: discord.Message):
         await message.channel.send("🚀 **Boss ka green signal aa gaya!** Tillu is back in action for everyone! Sab log sawaal pucho.")
         return
 
+    # ── TILLU AUDIT COMMAND (Natural language or !audit) ───────────────────────
+    if (author_is_owner or is_privileged_user(author, message.guild)) and (
+        re.search(r'^(?:hey\s+|arre\s+)?(?:tillu|mr\s*tillu)?\s*(?:audit|self\s*audit|audit\s*report)$', content_lower)
+        or content_lower in ["!audit", "tillu audit", "!selfaudit"]
+    ):
+        msg = await message.channel.send("🔍 **Tillu Self-Audit Initiated...** Analyzing recent tasks and error patterns...")
+        def _llm_reflect(prompt_text):
+            return query_gemini(prompt_text, "TilluAuditor", is_admin=True, is_owner_user=True)
+
+        res = await reflection_engine.execute_audit_cycle(
+            prompt_mgr=prompt_mgr,
+            rule_mgr=rule_mgr,
+            llm_reflection_fn=_llm_reflect
+        )
+        embed = discord.Embed(
+            title=f"🧠 Tillu Self-Audit Report #{reflection_engine.audit_counter}",
+            description=(
+                f"**Task Performance Diagnostics:**\n"
+                f"• Tasks Evaluated: **{res.get('total_tasks', 0)}**\n"
+                f"• Success Rate: **{res.get('success_rate', 100.0)}%** (`{res.get('success_count', 0)}` OK / `{res.get('fail_count', 0)}` Failed)\n"
+                f"• Classification Routing: `{json.dumps(res.get('system_breakdown', {}))}`\n\n"
+                f"**AI Diagnostics & Self-Improvement:**\n> {res.get('ai_reflection', 'Baseline stable')[:800]}"
+            ),
+            color=0x2ECC71 if res.get('success_rate', 100.0) >= 90 else 0xE67E22,
+            timestamp=discord.utils.utcnow()
+        )
+        if res.get("auto_learned_improvement"):
+            embed.add_field(name="🚀 Auto-Learned Robustness Rule", value=f"`{res.get('auto_learned_improvement')}`", inline=False)
+        embed.set_footer(text="5x Daily Autonomous Evolution Loop • Synced to GitHub")
+        await msg.edit(content=None, embed=embed)
+        return
+
     # When OWNER_ONLY_MODE is active, ignore anyone who is NOT the Owner!
     if OWNER_ONLY_MODE and not author_is_owner:
         return
@@ -3300,6 +3543,39 @@ async def scheduled_sync_loop():
         except Exception as ex:
             logging.error(f"[AutoLiveSync] Error on {g.name}: {ex}")
 
+# ── 5x DAILY AUTONOMOUS SELF-REFLECTION LOOP (Every 4.8 Hours) ───────────────
+@tasks.loop(hours=4.8)
+async def scheduled_self_reflection_loop():
+    try:
+        def _llm_reflect(prompt_text):
+            return query_gemini(prompt_text, "TilluAuditor", is_admin=True, is_owner_user=True)
+
+        res = await reflection_engine.execute_audit_cycle(
+            prompt_mgr=prompt_mgr,
+            rule_mgr=rule_mgr,
+            llm_reflection_fn=_llm_reflect
+        )
+        logging.info(f"[Scheduled Self-Reflection 5x/Day] Cycle #{reflection_engine.audit_counter}: {res.get('success_rate', 100.0)}% success")
+        for g in bot.guilds:
+            try:
+                up_ch = await get_or_create_update_channel(g)
+                if up_ch and res.get("auto_learned_improvement"):
+                    embed = discord.Embed(
+                        title=f"🧠 Tillu Autonomous 5x Daily Self-Audit Report #{reflection_engine.audit_counter}",
+                        description=(
+                            f"**Performance:** `{res.get('success_rate', 100.0)}%` success over `{res.get('total_tasks', 0)}` tasks.\n\n"
+                            f"**Auto-Learned Self-Improvement:**\n> {res.get('auto_learned_improvement')}"
+                        ),
+                        color=0x2ECC71,
+                        timestamp=discord.utils.utcnow()
+                    )
+                    embed.set_footer(text="Autonomous Evolution Engine • 5x Daily • Synced to GitHub")
+                    await up_ch.send(embed=embed)
+            except Exception as se:
+                logging.warning(f"[Scheduled Self-Reflection Notify Error] {se}")
+    except Exception as e:
+        logging.error(f"[Scheduled Self-Reflection Loop Error] {e}")
+
 @bot.event
 async def on_ready():
     logging.info(f"==========================================================")
@@ -3310,7 +3586,11 @@ async def on_ready():
             await guild.me.edit(nick="Tillu")
         except Exception:
             pass
-        # Discover other bots in server
+        # Discover and sync other bots in server
+        try:
+            await bot_orch.sync_guild_bots(guild)
+        except Exception as bse:
+            logging.warning(f"[BotOrchestrator Sync] {bse}")
         other_bots = [m for m in guild.members if m.bot and m.id != bot.user.id]
         if other_bots:
             logging.info(f"[Server Bots] Detected {len(other_bots)} other bots in '{guild.name}': {[b.name for b in other_bots]}")
@@ -3338,6 +3618,13 @@ async def on_ready():
             scheduled_sync_loop.start()
     except Exception as se:
         logging.warning(f"[ScheduledSync Init] {se}")
+
+    try:
+        if not scheduled_self_reflection_loop.is_running():
+            scheduled_self_reflection_loop.start()
+            logging.info("[ScheduledSelfReflection] 5x Daily self-reflection audit loop started.")
+    except Exception as rle:
+        logging.warning(f"[ScheduledSelfReflection Init] {rle}")
 
 
 async def main():

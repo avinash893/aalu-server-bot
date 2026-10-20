@@ -1213,6 +1213,57 @@ async def parse_and_execute_discord_action(
             except Exception as e:
                 return True, f"⚠️ Timeout error: {e}"
 
+    # 17. DISCORD KICK MEMBER
+    discord_kick_m = re.search(r'\b(?:kick|remove\s+user|server\s+se\s+nikalo)\s+([^\n\r]+)', text, re.IGNORECASE)
+    if discord_kick_m and (message.mentions or re.search(r'\d{17,20}', text) or "discord" in text.lower()):
+        target_str = discord_kick_m.group(1).strip()
+        target_member = await find_member_fuzzy(target_str)
+        if target_member:
+            if target_member.id == author.id:
+                return True, "Arre boss! Aap khud ko kick kyu kar rahe ho? 😂"
+            if target_member.top_role >= author.top_role and author.id != guild.owner_id:
+                return True, "🚫 Aap apne se unchi ya barabar role wale member ko kick nahi kar sakte!"
+            try:
+                await target_member.kick(reason=f"Kicked from Discord by Tillu on command of {author.name}")
+                return True, f"👢 **User Kicked from Discord:** `{target_member.display_name}` ({target_member.mention}) ko server se kick kar diya gaya hai!"
+            except Exception as e:
+                return True, f"⚠️ Discord kick failed: {e}"
+
+    # 18. DISCORD BAN MEMBER
+    discord_ban_m = re.search(r'\b(?:ban|server\s+ban|discord\s+ban)\s+([^\n\r]+)', text, re.IGNORECASE)
+    if discord_ban_m and (message.mentions or re.search(r'\d{17,20}', text) or "discord" in text.lower()):
+        target_str = discord_ban_m.group(1).strip()
+        target_member = await find_member_fuzzy(target_str)
+        if target_member:
+            if target_member.id == author.id:
+                return True, "Boss, main aapko ban nahi kar sakta! 👑"
+            if target_member.top_role >= author.top_role and author.id != guild.owner_id:
+                return True, "🚫 Aap apne se barabar ya unchi role wale member ko ban nahi kar sakte!"
+            try:
+                await guild.ban(target_member, reason=f"Banned from Discord by Tillu on command of {author.name}", delete_message_days=0)
+                return True, f"🔨 **User Banned from Discord:** `{target_member.display_name}` ({target_member.mention}) ko permanent ban kar diya gaya hai!"
+            except Exception as e:
+                return True, f"⚠️ Discord ban failed: {e}"
+
+    # 19. DISCORD UNBAN MEMBER
+    discord_unban_m = re.search(r'\b(?:unban|un-ban)\s+(?:from\s+discord\s+)?([^\n\r]+)', text, re.IGNORECASE)
+    if discord_unban_m and ("discord" in text.lower() or re.search(r'\d{17,20}', text)):
+        target_str = discord_unban_m.group(1).strip()
+        try:
+            bans = [entry async for entry in guild.bans()]
+            target_ban = None
+            for b in bans:
+                if str(b.user.id) == target_str or b.user.name.lower() == target_str.lower():
+                    target_ban = b
+                    break
+            if target_ban:
+                await guild.unban(target_ban.user, reason=f"Unbanned by Tillu on request of {author.name}")
+                return True, f"✅ **User Unbanned from Discord:** `{target_ban.user.name}` ko unban kar diya gaya hai!"
+            else:
+                return True, f"🔍 Discord ban list me user `{target_str}` nahi mila."
+        except Exception as e:
+            return True, f"⚠️ Discord unban failed: {e}"
+
     # ═════════════════════════════════════════════════════════════════════════
     # ── STEP 2: AI ACTION CLASSIFICATION (NVIDIA AI Primary -> Groq Fallback) ─
     # ═════════════════════════════════════════════════════════════════════════
