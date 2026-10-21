@@ -175,6 +175,7 @@ from discord_action_manager import parse_and_execute_discord_action
 from context_classifier import classify_request, TargetSystem, ClassificationResult
 from bot_orchestrator import BotOrchestrator
 from self_reflection import TaskTelemetryLogger, SelfReflectionEngine
+import minecraft_player_resolver as mc_resolver
 
 prompt_mgr = PromptManager(
     token=os.environ.get("GITHUB_TOKEN", ""),
@@ -642,6 +643,14 @@ ROLES & ACTIONS:
   FIRST LINE: ADMIN_INTENT: <exact_minecraft_console_command>
   Followed by: "Done boss! Command console me bhej diya! 🔥"
   CRITICAL: NEVER output ADMIN_INTENT for Discord server actions (like deleting Discord messages, deleting Discord roles, managing channels). Discord actions are handled directly by Discord tools, NOT console.
+
+- MINECRAFT LAND CLAIMS & CLAIM BLOCKS (GRIEFPREVENTION):
+  When an Admin or Owner tells you to give claim land or bonus claim blocks to a player (e.g. "give unlimited claim land to unique umar in minecraft" or "give 5000 claim blocks to unique umar"):
+  * GriefPrevention plugin is used for anti-grief land claiming!
+  * Command: ADMIN_INTENT: adjustbonusclaimblocks <player> <amount>
+  * For "unlimited" claim land, use 10000000 (10 million blocks). E.g.:
+    ADMIN_INTENT: adjustbonusclaimblocks .UNIQUE_UMAR_114 10000000
+  * Always use the closest matching registered player IGN (Bedrock players have '.' prefix like .UNIQUE_UMAR_114, .VAMPIRE674066).
 
 
 - REGULAR MEMBER WHITELIST:
@@ -2013,6 +2022,20 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
                 await reply_fn(content="🚫 Arre bhai, sirf Server Owner, Admins aur Moderators ke paas console ya ban/kick commands chalane ki permission hai!")
                 return
 
+            # If adjusting claim blocks, resolve closest player name and dispatch Bedrock fallback
+            if "adjustbonusclaimblocks" in cmd.lower() or "acb" in cmd.lower():
+                parts = cmd.split()
+                if len(parts) >= 2:
+                    raw_target = parts[1]
+                    res_p, _ = mc_resolver.resolve_closest_player(raw_target)
+                    if res_p:
+                        parts[1] = res_p
+                        cmd = " ".join(parts)
+                        if len(parts) >= 3:
+                            alt_p = res_p[1:] if res_p.startswith(".") else f".{res_p}"
+                            alt_quoted = f'"{alt_p}"' if " " in alt_p else alt_p
+                            await execute_server_command(f"{parts[0]} {alt_quoted} {parts[2]}")
+
             ok, resp_str = await execute_server_command(cmd)
 
             # If removing from whitelist, also clean local registry and sync role removal
@@ -2844,6 +2867,23 @@ async def cmd_unwhitelist(ctx, player: str = None):
     await ctx.send(f"🗑️ **[Whitelist Removed]** `{clean_p}` has been removed from the whitelist.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
 
 
+@bot.command(name="claimblocks", aliases=["giveclaims", "landclaim", "claimland", "acb"])
+async def cmd_claimblocks(ctx, player: str = None, amount: int = 10000000):
+    """Admin command to grant GriefPrevention claim blocks to a player."""
+    if not is_privileged_user(ctx.author, ctx.guild):
+        await ctx.send("🚫 Arre bhai, Minecraft me claim land ya bonus claim blocks allocate karne ki permission sirf Server Owner aur Admins ke paas hai! 🏰")
+        return
+    if not player:
+        await ctx.send("❌ Usage: `!claimblocks <player> [amount]` (Default amount is 10,000,000 for unlimited claim land)")
+        return
+    await mc_resolver.harvest_players_from_discord(bot, ctx.guild)
+    res_ign, _ = mc_resolver.resolve_closest_player(player)
+    target = res_ign or player.strip()
+    ok, msg = await mc_resolver.execute_claim_land_command(target, amount, execute_server_command)
+    amt_str = "unlimited (10,000,000)" if amount >= 10000000 else f"{amount:,}"
+    await ctx.send(f"🏰 **Done Boss!** Minecraft player `{target}` ko **{amt_str} claim blocks** de diye gaye hain! (GriefPrevention land claim active) ✨\n*(Dispatched to console <#{CONSOLE_CHANNEL_ID}>)*")
+
+
 @bot.command(name="start", aliases=["startserver", "turnon", "on"])
 async def cmd_start(ctx):
     await handle_start_request(ctx, user=ctx.author, guild=ctx.guild)
@@ -3159,6 +3199,17 @@ async def on_message(message: discord.Message):
     if bot.user and message.author.id == bot.user.id:
         return
 
+    # ── CONSOLE & CHAT CHANNELS: Harvest live player names from DiscordSRV ──
+    if message.channel.id in [CONSOLE_CHANNEL_ID, CHAT_CHANNEL_ID]:
+        if getattr(message, "webhook_id", None) and message.author and message.author.name:
+            mc_resolver.record_player(message.author.name)
+        if "whitelisted player" in raw_text.lower():
+            wl_m = re.search(r'whitelisted player\(s\):\s*([^\n\r]+)', raw_text, re.IGNORECASE)
+            if wl_m:
+                for n in re.sub(r'[\r\n`]+', '', wl_m.group(1)).split(','):
+                    if n.strip():
+                        mc_resolver.record_player(n.strip())
+
     # ── CONSOLE CHANNEL: Intercept & Format 'whitelist list' output ───────────
     raw_text = message.content or ""
     if not raw_text and message.embeds:
@@ -3302,18 +3353,73 @@ async def on_message(message: discord.Message):
             return
         return
 
+    # ── MINECRAFT GRIEFPREVENTION CLAIM LAND INTENT (Fast-Path) ───────────────
+    # Handles: "tillu give unlimited claim land to unique umar in minecraft", "give 5000 claim blocks to unique umar", "unique umar ko unlimited claim de do"
+    clean_action_text = re.sub(r'^(?:hey\s+)?(?:tillu|mr\.?\s*tillu)[,\s]*', '', message.content, flags=re.IGNORECASE).strip()
+    claim_match_1 = re.search(
+        r'(?:give|add|assign|grant|allocate|de\s+do)\s+(?:(unlimited|\d+)\s+)?(?:claim\s+(?:land|blocks?)|land\s+claims?|claims?|claimblocks)\s+to\s+([^\n\r]+)',
+        clean_action_text,
+        re.IGNORECASE
+    )
+    claim_match_2 = re.search(
+        r'([^\n\r]+?)\s+ko\s+(?:(unlimited|\d+)\s+)?(?:claim\s+(?:land|blocks?)|land\s+claims?|claims?|claimblocks)\s*(?:de\s+do|give|allocate|chahiye)?',
+        clean_action_text,
+        re.IGNORECASE
+    )
+    claim_match_3 = re.search(
+        r'(?:give|add|assign|grant|allocate|de\s+do)\s+([^\n\r]+?)\s+(?:(unlimited|\d+)\s+)?(?:claim\s+(?:land|blocks?)|land\s+claims?|claims?|claimblocks)',
+        clean_action_text,
+        re.IGNORECASE
+    )
+
+    claim_match = claim_match_1 or claim_match_2 or claim_match_3
+    if claim_match:
+        if claim_match == claim_match_1:
+            raw_amt = claim_match.group(1) or "unlimited"
+            raw_target = claim_match.group(2)
+        elif claim_match == claim_match_2:
+            raw_amt = claim_match.group(2) or "unlimited"
+            raw_target = claim_match.group(1)
+        else:
+            raw_amt = claim_match.group(2) or "unlimited"
+            raw_target = claim_match.group(1)
+
+        raw_target = re.sub(r'\b(in\s+minecraft|in\s+game|in\s+mc|minecraft|game)\b', '', raw_target, flags=re.IGNORECASE).strip()
+
+        if not is_privileged_user(message.author, message.guild):
+            await message.channel.send("🚫 Arre bhai, Minecraft me claim land ya bonus claim blocks allocate karne ki permission sirf Server Owner aur Admins ke paas hai! 🏰")
+            return
+
+        amount = 10000000 if raw_amt.lower() in ["unlimited", "infinite", "full", "sab", "max"] else int(re.sub(r'\D', '', raw_amt) or 10000000)
+
+        # Harvest players from DiscordSRV & console if needed
+        await mc_resolver.harvest_players_from_discord(bot, message.guild)
+        resolved_ign, conf = mc_resolver.resolve_closest_player(raw_target)
+        target_ign = resolved_ign or raw_target
+
+        ok, c_msg = await mc_resolver.execute_claim_land_command(target_ign, amount, execute_server_command)
+        amt_str = "unlimited (10,000,000)" if amount >= 10000000 else f"{amount:,}"
+        await message.channel.send(
+            f"🏰 **Done Boss!** Minecraft player `{target_ign}` ko **{amt_str} claim blocks** de diye gaye hain! Ab wo kitna bhi land claim kar sakta hai! ✨\n*(Dispatched to console <#{CONSOLE_CHANNEL_ID}> via GriefPrevention)*"
+        )
+        return
+
     # ── AUTONOMOUS DISCORD MANAGEMENT ACTIONS (Roles, Channels, Message Deletions, Timeouts) ──
     if is_privileged_user(message.author, message.guild):
         # Strip "tillu" prefix so regex patterns match cleanly
-        action_text = re.sub(r'^(?:hey\s+)?(?:tillu|mr\.?\s*tillu)[,\s]*', '', message.content, flags=re.IGNORECASE).strip()
+        action_text = clean_action_text
         # Also normalize "named:-" / "named :-" / "named:" to "named "
         action_text = re.sub(r'\bnamed?\s*[:\-]+\s*', 'named ', action_text, flags=re.IGNORECASE)
         action_text = re.sub(r'\bcalled?\s*[:\-]+\s*', 'called ', action_text, flags=re.IGNORECASE)
-        handled, resp = await parse_and_execute_discord_action(message, message.author, message.guild, action_text)
-        if handled:
-            if resp:
-                await message.channel.send(resp)
-            return
+
+        # GUARD: Check context classifier - if this is targeting Minecraft, skip Discord management!
+        classification = classify_request(action_text, channel_name=getattr(message.channel, 'name', ''))
+        if classification.system != TargetSystem.MINECRAFT:
+            handled, resp = await parse_and_execute_discord_action(message, message.author, message.guild, action_text)
+            if handled:
+                if resp:
+                    await message.channel.send(resp)
+                return
 
 
 

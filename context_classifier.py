@@ -261,7 +261,28 @@ def classify_request(
                 reasoning="Command targets Discord server structure (role/channel/category/backup)."
             )
 
-    # 5. MINECRAFT WHITELIST / PLAYERS / POWER / STATUS
+    # 5. MINECRAFT WHITELIST / PLAYERS / POWER / STATUS / CLAIMS
+    # 5.1 Claim Land / Claim Blocks (GriefPrevention)
+    if re.search(r'\b(?:claim\s*(?:land|blocks?|claims?)?|land\s*claims?|unlimited\s+claims?|claims?|griefprevention|adjustbonusclaimblocks|acb|scb)\b', q_lower):
+        if not any(w in q_lower for w in ["drop", "vault", "reward"]):
+            return ClassificationResult(
+                system=TargetSystem.MINECRAFT,
+                action="mc_claim_blocks",
+                confidence=0.98,
+                reasoning="Command targets Minecraft GriefPrevention claim land or bonus claim blocks.",
+                parameters={"query": q_clean}
+            )
+
+    # 5.2 Explicit Minecraft In-Game Actions
+    if any(w in q_lower for w in ["in minecraft", "in mc", "in game", "ingame", "minecraft me", "mc me"]):
+        return ClassificationResult(
+            system=TargetSystem.MINECRAFT,
+            action="mc_game_action",
+            confidence=0.96,
+            reasoning="Command explicitly specifies Minecraft in-game execution context.",
+            parameters={"query": q_clean}
+        )
+
     # Whitelist
     if re.search(r'\b(?:whitelist|whitelisted|wl)\b', q_lower):
         return ClassificationResult(

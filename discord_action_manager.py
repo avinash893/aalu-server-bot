@@ -455,6 +455,17 @@ async def parse_and_execute_discord_action(
 
     clean_text = text.lower().strip()
 
+    # ── MINECRAFT CONTEXT GUARD: Never hijack Minecraft in-game actions ──
+    mc_indicators = [
+        "in minecraft", "in mc", "in game", "ingame", "minecraft me", "mc me",
+        "claim land", "claim blocks", "claimblocks", "unlimited claim", "adjustbonusclaimblocks",
+        "acb", "scb", "diamonds", "gamemode", "whitelist", "server ip", "server port",
+        "griefprevention"
+    ]
+    if any(ind in clean_text for ind in mc_indicators):
+        if not ("discord role" in clean_text or "discord channel" in clean_text):
+            return False, None
+
     # ── FAST BAILOUT: Skip immediately for normal conversation (0ms overhead) ──
     MGMT_KEYWORDS = [
         "role", "channel", "delete", "purge", "clear", "remove", "saaf", "hata", "mute", "timeout",
@@ -794,9 +805,10 @@ async def parse_and_execute_discord_action(
 
 
     # 4. GIVE / ADD ROLE (also handles: "create role X and add Y to it")
-    # e.g., "tillu give role VIP to @user", "create role Creators and add uniqueumar to it"
+    # e.g., "tillu give role VIP to @user", "give VIP role to @user", "create role Creators and add uniqueumar to it"
+    # NOTE: Explicitly requires the word 'role' or a <@&role_id> mention to prevent hijacking Minecraft / general commands
     add_role_match = re.search(
-        r'(?:give|add|assign|de\s+do)\s+(?:role\s+)?(?:<@&(\d+)>|["\']?([^"\'\n]+?)["\']?)\s+(?:role\s+)?to\s+(.+)',
+        r'(?:give|add|assign|de\s+do)\s+(?:role\s+<@&(\d+)>|<@&(\d+)>|role\s+["\']?([^"\'\n]+?)["\']?|["\']?([^"\'\n]+?)["\']?\s+role)\s+to\s+(.+)',
         text,
         re.IGNORECASE
     )
@@ -812,10 +824,10 @@ async def parse_and_execute_discord_action(
             role_query = compound_match.group(1).strip()
             target_query = compound_match.group(2).strip()
         else:
-            role_id = add_role_match.group(1)
-            role_name_raw = add_role_match.group(2)
+            role_id = add_role_match.group(1) or add_role_match.group(2)
+            role_name_raw = add_role_match.group(3) or add_role_match.group(4)
             role_query = role_id or (role_name_raw or "").strip()
-            target_query = add_role_match.group(3).strip()
+            target_query = add_role_match.group(5).strip()
 
         # Find or create role
         role = find_role_fuzzy(role_query) or find_role_fuzzy(role_query.title())
@@ -841,17 +853,17 @@ async def parse_and_execute_discord_action(
             return True, f"⚠️ Role assign error: {e}"
 
     # 5. REMOVE ROLE FROM MEMBER
-    # e.g., "tillu remove role VIP from @user"
+    # e.g., "tillu remove role VIP from @user", "remove VIP role from @user"
     rem_role_match = re.search(
-        r'(?:remove|take|hata\s+do)\s+(?:role\s+)?(?:<@&(\d+)>|["\']?([^"\'\n]+?)["\']?)\s+from\s+(.+)',
+        r'(?:remove|take|hata\s+do)\s+(?:role\s+<@&(\d+)>|<@&(\d+)>|role\s+["\']?([^"\'\n]+?)["\']?|["\']?([^"\'\n]+?)["\']?\s+role)\s+from\s+(.+)',
         text,
         re.IGNORECASE
     )
     if rem_role_match:
-        role_id = rem_role_match.group(1)
-        role_name_raw = rem_role_match.group(2)
+        role_id = rem_role_match.group(1) or rem_role_match.group(2)
+        role_name_raw = rem_role_match.group(3) or rem_role_match.group(4)
         role_query = role_id or (role_name_raw or "").strip()
-        target_query = rem_role_match.group(3).strip()
+        target_query = rem_role_match.group(5).strip()
 
         target_member = await find_member_fuzzy(target_query)
         if not target_member:
