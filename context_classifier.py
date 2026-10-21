@@ -302,6 +302,16 @@ def classify_request(
                 reasoning="Server power action targets the Minecraft game server."
             )
 
+    # Server Status / Health
+    if re.search(r'\b(?:status|online\s+hai|chalu\s+hai|chal\s+raha\s+hai|health)\b', q_lower):
+        if any(w in q_lower for w in ["server", "mc", "minecraft", "game"]):
+            return ClassificationResult(
+                system=TargetSystem.MINECRAFT,
+                action="server_status",
+                confidence=0.95,
+                reasoning="Query asks for Minecraft server status or online health."
+            )
+
     # Player count / online players
     if re.search(r'\b(?:players?|who\s+is\s+(?:playing|online)|kaun\s+khel\s+raha|kitne\s+players?|kitne\s+log\s+khel)\b', q_lower):
         return ClassificationResult(
@@ -330,7 +340,14 @@ def classify_request(
         )
 
     # 6. MEMORY & RULES
-    if re.search(r'\b(?:yaad\s*rakh|remember\s*this|note\s*this|learn\s*this)\b', q_lower):
+    if re.search(r'\b(?:yaad\s*(?:rakh|rakho|rakhna)|remember(?:\s*this)?|note\s*(?:this|down)|learn\s*this)\b', q_lower):
+        if re.search(r'\b(?:rule|niyam|law|karega|karna)\b', q_lower):
+            return ClassificationResult(
+                system=TargetSystem.RULE,
+                action="create_rule",
+                confidence=0.95,
+                reasoning="User instructed Tillu to memorize an autonomous behavioral rule."
+            )
         return ClassificationResult(
             system=TargetSystem.MEMORY,
             action="remember_fact",

@@ -177,6 +177,9 @@ from bot_orchestrator import BotOrchestrator
 from self_reflection import TaskTelemetryLogger, SelfReflectionEngine
 import minecraft_player_resolver as mc_resolver
 import antigravity_bridge
+from hot_reloader import HotReloader
+
+hot_reloader = HotReloader()
 
 prompt_mgr = PromptManager(
     token=os.environ.get("GITHUB_TOKEN", ""),
@@ -1966,8 +1969,12 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
     user_id = getattr(user, "id", 0)
     answer = None
 
-    if antigravity_bridge.is_antigravity_available():
+    # Smart Hybrid Routing: Route commands, rules, actions & memory to Antigravity Agent; general chat to fast Gemini API
+    is_general_chat = (classification.system == TargetSystem.GENERAL_CHAT)
+
+    if not is_general_chat and antigravity_bridge.is_antigravity_available():
         try:
+            logging.info(f"[Hybrid Router] Routing intent '{classification.system.value}:{classification.action}' to Antigravity Agent...")
             sys_context = build_full_system_context(str(user), user_id, is_admin, author_is_owner, target_guild)
             ag_resp = await antigravity_bridge.query_antigravity(query_with_classifier, sys_context, str(user))
             if ag_resp:
@@ -1977,6 +1984,8 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
             logging.warning(f"[Antigravity Engine] Fallback trigger: {ag_err}")
 
     if not answer:
+        if is_general_chat:
+            logging.info(f"[Hybrid Router] Routing general chat directly to fast Gemini API...")
         answer = await asyncio.to_thread(query_gemini, query_with_classifier, str(user), user_id, is_admin, author_is_owner, target_guild)
     answer = clean_thought_process(answer)
     if not answer:
@@ -2563,6 +2572,37 @@ async def slash_update(interaction: discord.Interaction):
     except Exception as e:
         logging.error(f"[SelfUpdate Error]: {e}")
         await interaction.followup.send(f"⚠️ Update failed: `{e}`.")
+
+@bot.tree.command(name="reload", description="Soft-reload all Tillu submodules in-memory without restarting container (Admin only)")
+async def slash_reload(interaction: discord.Interaction):
+    if not is_privileged_user(interaction.user, interaction.guild):
+        return await safe_send_interaction(interaction, "🚫 Only Server Owner and Administrators can reload Tillu!", ephemeral=True)
+
+    await safe_send_interaction(interaction, "⚡ **Soft-reloading Tillu modules in-memory...**", ephemeral=False)
+    results = await asyncio.to_thread(hot_reloader.reload_all)
+    
+    ok_count = sum(1 for v in results.values() if "Reloaded" in v or "Imported" in v)
+    total_count = len(results)
+    
+    lines = [f"• `{mod}`: {status}" for mod, status in results.items()]
+    summary = "\n".join(lines[:12])
+    
+    embed = discord.Embed(
+        title="⚡ Tillu In-Memory Soft-Reload Complete",
+        description=f"Successfully soft-reloaded **{ok_count}/{total_count}** submodules without restarting the container!\n\n{summary}",
+        color=0x00FF88
+    )
+    embed.set_footer(text="Google Antigravity & Discord Gateway stayed live with zero downtime!")
+    await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="restart", description="Perform an in-place Python process reboot without stopping the container (Admin only)")
+async def slash_restart(interaction: discord.Interaction):
+    if not is_privileged_user(interaction.user, interaction.guild):
+        return await safe_send_interaction(interaction, "🚫 Only Server Owner and Administrators can restart Tillu!", ephemeral=True)
+
+    await safe_send_interaction(interaction, "🔄 **Restarting Tillu process in-place...** Container will remain online.", ephemeral=False)
+    await asyncio.sleep(1.0)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 @bot.command(name="audit", aliases=["selfaudit", "auditreport"])
 async def cmd_audit(ctx):
@@ -3822,6 +3862,12 @@ async def on_ready():
             logging.info("[ScheduledSelfReflection] 5x Daily self-reflection audit loop started.")
     except Exception as rle:
         logging.warning(f"[ScheduledSelfReflection Init] {rle}")
+
+    try:
+        hot_reloader.start_watcher(interval_seconds=5.0)
+        logging.info("[HotReloader] Automatic file watcher enabled in on_ready.")
+    except Exception as hre:
+        logging.warning(f"[HotReloader Init] {hre}")
 
 
 async def main():

@@ -51,9 +51,11 @@ async def query_antigravity(prompt: str, system_instructions: str, author_name: 
         return None
 
     try:
+        gemini_key = os.environ.get("GEMINI_API_KEY", "").strip() or None
         config = LocalAgentConfig(
             system_instructions=system_instructions,
-            capabilities=CapabilitiesConfig()
+            capabilities=CapabilitiesConfig(),
+            api_key=gemini_key
         )
         async with Agent(config) as agent:
             resp = await agent.chat(prompt)
