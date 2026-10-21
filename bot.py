@@ -53,13 +53,13 @@ if os.path.exists(env_path):
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 SERVER_HOST = os.environ.get("SERVER_HOST", "legacy-7.hexacraft.fun")
 
-# Decouple Minecraft server port from Pterodactyl container allocation port (e.g. 19133)
+# Decouple Minecraft server port from Pterodactyl container allocation port (19133)
 _raw_mc_port = os.environ.get("MC_SERVER_PORT") or os.environ.get("MINECRAFT_PORT")
-if _raw_mc_port:
+if _raw_mc_port and str(_raw_mc_port).strip() not in ("19133", "19132", "10000", "8080", "5000"):
     SERVER_PORT = int(_raw_mc_port)
 else:
-    _env_p = os.environ.get("SERVER_PORT", "25587")
-    SERVER_PORT = 25587 if str(_env_p) in ("19133", "19132", "10000", "8080", "5000") else int(_env_p)
+    _env_p = str(os.environ.get("SERVER_PORT", "25587")).strip()
+    SERVER_PORT = 25587 if _env_p in ("19133", "19132", "10000", "8080", "5000", "") else int(_env_p)
 
 PRIMARY_GUILD_ID = int(os.environ.get("PRIMARY_GUILD_ID", "1456298447979286541"))
 CS2_GUILD_ID = int(os.environ.get("CS2_GUILD_ID", "1530719250237362297"))
@@ -578,13 +578,18 @@ MINECRAFT SERVER DETAILS:
 - Features & Game Modes:
   * OneBlock Void: Mine endless regenerating block, progress through 10+ phases (Plains, Nether, End), expand sky island (`/ob`, `/oneblock`).
   * Survival SMP: Classic survival, player shops, villager trading hall, anti-grief land claiming (`/smp`).
-  * Superheroes Arena: Choose kits with superpowers (`/arena`, `/kit`):
-    - Spider-Man (web slinger & wall climb)
-    - Iron Man (repulsor blast & flight)
-    - Thor (lightning strike & hammer throw)
-    - Hulk (ground smash & super jump)
-    - Flash (speed force & rapid strike)
-    - Superman (heat vision & invulnerability)
+  * Superheroes Arena & RPG Kits: Choose kits with superpowers (`/arena`, `/kit`):
+    - Spider-Man (web slinger & wall climb, 10s cooldown)
+    - Iron Man (repulsor blast & flight, 12s cooldown)
+    - Thor (lightning strike & hammer throw, 15s cooldown)
+    - Hulk (ground smash & super jump, 10s cooldown)
+    - Flash (speed force & rapid strike, 8s cooldown)
+    - Superman (heat vision & invulnerability, 20s cooldown)
+    - Vampire / Blood Knight abilities (life steal & bat dash, standard 12s cooldown). Note: If someone mentions 'vampire' on our server, also note that '.VAMPIRE674066' is a well-known registered Bedrock supporter player on our server!
+- Bedrock Edition Crossplay: Connected via GeyserMC/Floodgate. Bedrock/PE mobile players appear with a dot '.' prefix in their usernames (e.g. `.VAMPIRE674066`, `.UNIQUE_UMAR_114`, `.NAKEEBGAM`).
+- Compound / Multi-Part Requests:
+  * If a user asks MULTIPLE questions in one message (e.g. gameplay rule/cooldown AND player list):
+  * You MUST address BOTH parts cleanly and directly using bullet points. Never skip one part!
 - Host: HexaCraft 24/7 protected server with custom Pterodactyl automation.
 - Whitelist: Whitelist is enabled! Anyone can whitelist themselves by asking you (e.g. "tillu whitelist me <IGN>") or using `/whitelist <ign>`.
 - Power: Anyone can turn on the server anytime using `/start`, `!start`, or by asking you!
@@ -2463,6 +2468,57 @@ async def slash_help(interaction: discord.Interaction):
     await safe_send_interaction(interaction, embed=embed, view=ServerControlView(), ephemeral=True)
 
 # ── TEXT COMMANDS ────────────────────────────────────────────────────────────
+@bot.command(name="update", aliases=["pull", "gitpull", "selfupdate"])
+async def cmd_update(ctx):
+    """Pulls latest updates from GitHub and auto-restarts the bot (Server Owner & Admins only)."""
+    if not is_privileged_user(ctx.author, ctx.guild):
+        return await ctx.send("🚫 Sirf Server Owner ya Administrators hi Tillu ko update kar sakte hain!")
+
+    msg = await ctx.send("🔄 **Tillu Self-Update in progress...** Pulling latest code from GitHub `main`...")
+    try:
+        import subprocess, sys, os
+        res = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "pull", "origin", "main"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        out = (res.stdout or "") + (res.stderr or "")
+        logging.info(f"[SelfUpdate] Git pull result:\n{out}")
+
+        await msg.edit(content=f"✅ **GitHub Update Pulled!**\n```\n{out[:400]}\n```\n🚀 Restarting Tillu process now...")
+        await asyncio.sleep(1.0)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    except Exception as e:
+        logging.error(f"[SelfUpdate Error]: {e}")
+        await msg.edit(content=f"⚠️ Update failed: `{e}`. Check console logs.")
+
+@bot.tree.command(name="update", description="Pulls latest updates from GitHub and auto-restarts Tillu (Owner/Admin only)")
+async def slash_update(interaction: discord.Interaction):
+    if not is_privileged_user(interaction.user, interaction.guild):
+        return await safe_send_interaction(interaction, "🚫 Only Server Owner and Administrators can update Tillu!", ephemeral=True)
+
+    await safe_send_interaction(interaction, "🔄 **Tillu Self-Update in progress...** Pulling latest code from GitHub `main`...", ephemeral=False)
+    try:
+        import subprocess, sys, os
+        res = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "pull", "origin", "main"],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        out = (res.stdout or "") + (res.stderr or "")
+        logging.info(f"[SelfUpdate] Git pull result:\n{out}")
+
+        await interaction.followup.send(f"✅ **GitHub Update Pulled!**\n```\n{out[:400]}\n```\n🚀 Restarting Tillu process now...")
+        await asyncio.sleep(1.0)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    except Exception as e:
+        logging.error(f"[SelfUpdate Error]: {e}")
+        await interaction.followup.send(f"⚠️ Update failed: `{e}`.")
+
 @bot.command(name="audit", aliases=["selfaudit", "auditreport"])
 async def cmd_audit(ctx):
     if not is_privileged_user(ctx.author, ctx.guild):
@@ -3450,9 +3506,22 @@ async def on_message(message: discord.Message):
     if not query:
         query = content
 
-    # ── LIVE MINECRAFT PLAYERS CHECK (Natural language intent) ─────────────────
+    # ── SELF-UPDATE COMMAND (Owner & Admin only) ──────────────────────────────
     clean_q = query.lower().strip()
-    if re.search(r'\b(?:players?|who\s+is\s+(?:playing|online)|kaun\s+(?:khel\s+raha\s+hai|online\s+hai|khel\s+rahe\s+hain|khel\s+raha)|kitne\s+(?:players?|log)\s+(?:khel\s+rahe|online)\s+hai|list\s+players?)\b', clean_q) or clean_q in ["players", "online", "list", "who is playing", "kaun khel raha hai"]:
+    if clean_q in ["update", "pull", "git pull", "update yourself", "self update", "pull latest code", "tillu update"]:
+        ctx = await bot.get_context(message)
+        await cmd_update(ctx)
+        return
+
+    # ── LIVE MINECRAFT PLAYERS CHECK (Natural language intent) ─────────────────
+    is_standalone_players_cmd = (
+        clean_q in ["players", "online", "list", "who is playing", "who is online", "kaun khel raha hai", "online players", "list players", "kaun online hai", "players online"]
+        or (
+            len(clean_q.split()) <= 7
+            and bool(re.match(r'^(?:who\s+is\s+(?:playing|online)|list\s+players?|online\s+players?|kitne\s+(?:players?|log)\s+(?:khel\s+rahe|online)\s+hai|kaun\s+(?:khel\s+raha\s+hai|online\s+hai))', clean_q))
+        )
+    )
+    if is_standalone_players_cmd:
         await handle_players_command(message.channel, message.author)
         return
 
