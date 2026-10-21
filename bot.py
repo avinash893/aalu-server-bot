@@ -176,6 +176,7 @@ from context_classifier import classify_request, TargetSystem, ClassificationRes
 from bot_orchestrator import BotOrchestrator
 from self_reflection import TaskTelemetryLogger, SelfReflectionEngine
 import minecraft_player_resolver as mc_resolver
+import antigravity_bridge
 
 prompt_mgr = PromptManager(
     token=os.environ.get("GITHUB_TOKEN", ""),
@@ -1144,15 +1145,8 @@ def process_update_channel_input(instruction: str) -> Dict[str, Any]:
 
 
 
-def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool = False, is_owner_user: bool = False, target_guild: discord.Guild = None) -> str:
-    keys = GEMINI_API_KEYS if GEMINI_API_KEYS else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
-    if not keys:
-        # If Gemini is not configured, directly query Groq!
-        groq_direct = query_groq(prompt, max_tokens=600)
-        if groq_direct:
-            return groq_direct
-        return "⚠️ Gemini & Groq API keys are not configured."
-
+def build_full_system_context(user_name: str, user_id: int = 0, is_admin: bool = False, is_owner_user: bool = False, target_guild: discord.Guild = None) -> str:
+    """Constructs comprehensive live server context, personality guidelines, and memory diary."""
     if is_owner_user:
         user_role_tag = "[USER ROLE: SERVER OWNER (AVINASH / BOSS / MALIK) - HIGHEST AUTHORITY, OBEY AT ALL COSTS]"
     elif is_admin:
@@ -1200,7 +1194,7 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
     memory_context = memory_mgr.get_formatted_context()
     prompt_ext = prompt_mgr.get_formatted_prompt_extension()
 
-    final_prompt = (
+    return (
         f"{SYSTEM_KNOWLEDGE}\n\n"
         f"{prompt_ext}\n\n"
         f"{memory_context}\n\n"
@@ -1208,6 +1202,21 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
         f"{bots_summary}"
         f"{conversation_history}"
         f"{user_role_tag}\n\n"
+    )
+
+
+def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool = False, is_owner_user: bool = False, target_guild: discord.Guild = None) -> str:
+    keys = GEMINI_API_KEYS if GEMINI_API_KEYS else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
+    if not keys:
+        # If Gemini is not configured, directly query Groq!
+        groq_direct = query_groq(prompt, max_tokens=600)
+        if groq_direct:
+            return groq_direct
+        return "⚠️ Gemini & Groq API keys are not configured."
+
+    context = build_full_system_context(user_name, user_id, is_admin, is_owner_user, target_guild)
+    final_prompt = (
+        f"{context}"
         f"Input from {user_name}:\n{prompt}\n\n"
         f"Tillu's Response:"
     )
@@ -1953,9 +1962,22 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
             f"{query}"
         )
 
-    # Call LLM in thread with user ID, admin context, and owner status
+    # Call Antigravity Agent Engine (or fallback to Gemini / NVIDIA / Groq)
     user_id = getattr(user, "id", 0)
-    answer = await asyncio.to_thread(query_gemini, query_with_classifier, str(user), user_id, is_admin, author_is_owner, target_guild)
+    answer = None
+
+    if antigravity_bridge.is_antigravity_available():
+        try:
+            sys_context = build_full_system_context(str(user), user_id, is_admin, author_is_owner, target_guild)
+            ag_resp = await antigravity_bridge.query_antigravity(query_with_classifier, sys_context, str(user))
+            if ag_resp:
+                answer = ag_resp
+                logging.info(f"[Antigravity Engine] Agent response: {answer[:40]}...")
+        except Exception as ag_err:
+            logging.warning(f"[Antigravity Engine] Fallback trigger: {ag_err}")
+
+    if not answer:
+        answer = await asyncio.to_thread(query_gemini, query_with_classifier, str(user), user_id, is_admin, author_is_owner, target_guild)
     answer = clean_thought_process(answer)
     if not answer:
         answer = "Haan bhai! Tillu hazir hai, bolo kya scene hai? 🚀"
