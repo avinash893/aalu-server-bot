@@ -81,10 +81,11 @@ if not GEMINI_API_KEYS and GEMINI_API_KEY:
     GEMINI_API_KEYS = [GEMINI_API_KEY]
 
 GEMINI_MODELS = [
-    "gemini-flash-latest",
-    "gemini-flash-lite-latest",
+    "gemini-3-flash-preview",
     "gemini-3.5-flash",
-    "gemini-3-flash-preview"
+    "gemini-3.1-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-flash-latest",
 ]
 
 # ── TILLU KNOWLEDGE & MEMORY SYSTEM (WITH GITHUB AUTO-SYNC) ──────────────────
@@ -1267,7 +1268,7 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
                 }
             }
             try:
-                r = requests.post(url, json=payload, timeout=4)
+                r = requests.post(url, json=payload, timeout=12)
                 if r.status_code == 200:
                     data = r.json()
                     text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
