@@ -3262,6 +3262,10 @@ async def on_message(message: discord.Message):
     if bot.user and message.author.id == bot.user.id:
         return
 
+    raw_text = message.content or ""
+    if not raw_text and message.embeds:
+        raw_text = " ".join([e.description or "" for e in message.embeds if e.description])
+
     # ── CONSOLE & CHAT CHANNELS: Harvest live player names from DiscordSRV ──
     if message.channel.id in [CONSOLE_CHANNEL_ID, CHAT_CHANNEL_ID]:
         if getattr(message, "webhook_id", None) and message.author and message.author.name:
@@ -3274,10 +3278,6 @@ async def on_message(message: discord.Message):
                         mc_resolver.record_player(n.strip())
 
     # ── CONSOLE CHANNEL: Intercept & Format 'whitelist list' output ───────────
-    raw_text = message.content or ""
-    if not raw_text and message.embeds:
-        raw_text = " ".join([e.description or "" for e in message.embeds if e.description])
-
     if "whitelisted player" in raw_text.lower():
         if message.channel.id == CONSOLE_CHANNEL_ID:
             embed = format_whitelisted_players_embed(raw_text)
