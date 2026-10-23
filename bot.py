@@ -716,68 +716,114 @@ def clean_thought_process(text: str) -> str:
     return text.strip()
 
 
-# ── POLLINATIONS VISION & LINK UNDERSTANDING ─────────────────────────────────
+# ── VISION & LINK UNDERSTANDING (GEMINI VISION PRIMARY & POLLINATIONS FALLBACK) ──
 POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY", "")
 
 def analyze_image_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
-    """Analyze Discord attachment image using Pollinations Vision endpoint."""
-    if not POLLINATIONS_API_KEY:
+    """Analyze Discord attachment image using Gemini Vision (primary) or Pollinations (fallback)."""
+    if not image_bytes:
         return ""
-    try:
-        # Pre-compress and resize image with PIL if large to prevent timeouts and payload errors
-        processed_bytes = image_bytes
-        processed_mime = mime_type
-        try:
-            from PIL import Image
-            import io
-            if len(image_bytes) > 800 * 1024:
-                with Image.open(io.BytesIO(image_bytes)) as img:
-                    img.thumbnail((1280, 1280))
-                    if img.mode in ("RGBA", "P"):
-                        img = img.convert("RGB")
-                    out = io.BytesIO()
-                    img.save(out, format="JPEG", quality=85, optimize=True)
-                    processed_bytes = out.getvalue()
-                    processed_mime = "image/jpeg"
-        except Exception as pe:
-            logging.debug(f"[Vision AI] PIL compression notice: {pe}")
 
-        b64_img = base64.b64encode(processed_bytes).decode("utf-8")
-        data_uri = f"data:{processed_mime};base64,{b64_img}"
-        headers = {
-            "Authorization": f"Bearer {POLLINATIONS_API_KEY}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "openai",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
+    # 1. Pre-compress and resize image with PIL if large to prevent timeouts and payload errors
+    processed_bytes = image_bytes
+    processed_mime = mime_type
+    try:
+        from PIL import Image
+        import io
+        if len(image_bytes) > 800 * 1024 or not processed_mime.startswith("image/"):
+            with Image.open(io.BytesIO(image_bytes)) as img:
+                img.thumbnail((1280, 1280))
+                if img.mode in ("RGBA", "P"):
+                    img = img.convert("RGB")
+                out = io.BytesIO()
+                img.save(out, format="JPEG", quality=85, optimize=True)
+                processed_bytes = out.getvalue()
+                processed_mime = "image/jpeg"
+    except Exception as pe:
+        logging.debug(f"[Vision AI] PIL compression notice: {pe}")
+
+    b64_img = base64.b64encode(processed_bytes).decode("utf-8")
+
+    # ── ENGINE 1: GEMINI VISION (Native Multimodal with active Gemini API key) ──
+    keys = GEMINI_API_KEYS if GEMINI_API_KEYS else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
+    if keys:
+        vision_prompt = "Analyze and describe this image clearly and concisely in 2-4 sentences. Note key details, text, objects, memes, gameplay, errors, or context that a Discord assistant should understand."
+        vision_models = ["gemini-3-flash-preview", "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3.8-flash"]
+        for key in keys:
+            for model_name in vision_models:
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={key}"
+                payload = {
+                    "contents": [
                         {
-                            "type": "text",
-                            "text": "Analyze and describe this image clearly and concisely in 2-4 sentences. Note key details, text, objects, memes, gameplay, errors, or context that a Discord assistant should understand."
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": data_uri}
+                            "parts": [
+                                {"text": vision_prompt},
+                                {
+                                    "inline_data": {
+                                        "mime_type": processed_mime,
+                                        "data": b64_img
+                                    }
+                                }
+                            ]
                         }
-                    ]
+                    ],
+                    "generationConfig": {
+                        "temperature": 0.4,
+                        "maxOutputTokens": 300
+                    }
                 }
-            ],
-            "max_tokens": 300
-        }
-        r = requests.post("https://gen.pollinations.ai/v1/chat/completions", headers=headers, json=payload, timeout=20)
-        if r.status_code == 200:
-            data = r.json()
-            choices = data.get("choices", [])
-            if choices:
-                desc = choices[0].get("message", {}).get("content", "").strip()
-                return clean_thought_process(desc)
-        else:
-            logging.warning(f"[Vision AI] HTTP {r.status_code}: {r.text[:120]}")
-    except Exception as e:
-        logging.error(f"[Vision AI] Error analyzing image: {e}")
+                try:
+                    r = requests.post(url, json=payload, timeout=12)
+                    if r.status_code == 200:
+                        data = r.json()
+                        text = data.get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+                        if text:
+                            desc = clean_thought_process(text.strip())
+                            if desc:
+                                logging.info(f"[Vision AI] Successfully analyzed image using {model_name} ({len(desc)} chars).")
+                                return desc
+                    else:
+                        logging.warning(f"[Vision AI Gemini] {model_name} HTTP {r.status_code}: {r.text[:120]}")
+                except Exception as ve:
+                    logging.warning(f"[Vision AI Gemini] {model_name} Error: {ve}")
+                    continue
+
+    # ── ENGINE 2: POLLINATIONS VISION FALLBACK ──
+    if POLLINATIONS_API_KEY:
+        try:
+            data_uri = f"data:{processed_mime};base64,{b64_img}"
+            headers = {
+                "Authorization": f"Bearer {POLLINATIONS_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "openai",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Analyze and describe this image clearly and concisely in 2-4 sentences. Note key details, text, objects, memes, gameplay, errors, or context that a Discord assistant should understand."
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": data_uri}
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 300
+            }
+            r = requests.post("https://gen.pollinations.ai/v1/chat/completions", headers=headers, json=payload, timeout=20)
+            if r.status_code == 200:
+                data = r.json()
+                choices = data.get("choices", [])
+                if choices:
+                    desc = choices[0].get("message", {}).get("content", "").strip()
+                    return clean_thought_process(desc)
+        except Exception as pe:
+            logging.error(f"[Vision AI Pollinations] Error: {pe}")
+
     return ""
 
 
