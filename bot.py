@@ -744,7 +744,48 @@ def analyze_image_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> st
 
     b64_img = base64.b64encode(processed_bytes).decode("utf-8")
 
-    # ── ENGINE 1: GEMINI VISION (Native Multimodal with active Gemini API key) ──
+    # ── ENGINE 1: POLLINATIONS VISION (Primary) ──
+    if POLLINATIONS_API_KEY:
+        try:
+            data_uri = f"data:{processed_mime};base64,{b64_img}"
+            headers = {
+                "Authorization": f"Bearer {POLLINATIONS_API_KEY}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": "openai",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "Analyze and describe this image clearly and concisely in 2-4 sentences. Note key details, text, objects, memes, gameplay, errors, or context that a Discord assistant should understand."
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": data_uri}
+                            }
+                        ]
+                    }
+                ],
+                "max_tokens": 300
+            }
+            r = requests.post("https://gen.pollinations.ai/v1/chat/completions", headers=headers, json=payload, timeout=20)
+            if r.status_code == 200:
+                data = r.json()
+                choices = data.get("choices", [])
+                if choices:
+                    desc = choices[0].get("message", {}).get("content", "").strip()
+                    if desc:
+                        logging.info(f"[Vision AI] Successfully analyzed image using Pollinations Vision ({len(desc)} chars).")
+                        return clean_thought_process(desc)
+            else:
+                logging.warning(f"[Vision AI Pollinations] HTTP {r.status_code}: {r.text[:120]}")
+        except Exception as pe:
+            logging.error(f"[Vision AI Pollinations] Error: {pe}")
+
+    # ── ENGINE 2: GEMINI VISION (Fallback) ──
     keys = GEMINI_API_KEYS if GEMINI_API_KEYS else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
     if keys:
         vision_prompt = "Analyze and describe this image clearly and concisely in 2-4 sentences. Note key details, text, objects, memes, gameplay, errors, or context that a Discord assistant should understand."
@@ -779,50 +820,13 @@ def analyze_image_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> st
                         if text:
                             desc = clean_thought_process(text.strip())
                             if desc:
-                                logging.info(f"[Vision AI] Successfully analyzed image using {model_name} ({len(desc)} chars).")
+                                logging.info(f"[Vision AI] Successfully analyzed image using Gemini {model_name} ({len(desc)} chars).")
                                 return desc
                     else:
                         logging.warning(f"[Vision AI Gemini] {model_name} HTTP {r.status_code}: {r.text[:120]}")
                 except Exception as ve:
                     logging.warning(f"[Vision AI Gemini] {model_name} Error: {ve}")
                     continue
-
-    # ── ENGINE 2: POLLINATIONS VISION FALLBACK ──
-    if POLLINATIONS_API_KEY:
-        try:
-            data_uri = f"data:{processed_mime};base64,{b64_img}"
-            headers = {
-                "Authorization": f"Bearer {POLLINATIONS_API_KEY}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": "openai",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "Analyze and describe this image clearly and concisely in 2-4 sentences. Note key details, text, objects, memes, gameplay, errors, or context that a Discord assistant should understand."
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": data_uri}
-                            }
-                        ]
-                    }
-                ],
-                "max_tokens": 300
-            }
-            r = requests.post("https://gen.pollinations.ai/v1/chat/completions", headers=headers, json=payload, timeout=20)
-            if r.status_code == 200:
-                data = r.json()
-                choices = data.get("choices", [])
-                if choices:
-                    desc = choices[0].get("message", {}).get("content", "").strip()
-                    return clean_thought_process(desc)
-        except Exception as pe:
-            logging.error(f"[Vision AI Pollinations] Error: {pe}")
 
     return ""
 
