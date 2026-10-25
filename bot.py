@@ -24,6 +24,8 @@ from typing import Optional, List, Dict, Any, Union
 import base64
 import urllib.request
 import urllib.parse
+import key_vault
+import key_portal
 
 # Force UTF-8 output encoding across environments to avoid UnicodeEncodeError crashes
 try:
@@ -719,10 +721,15 @@ def clean_thought_process(text: str) -> str:
 # ── VISION & LINK UNDERSTANDING (GEMINI VISION PRIMARY & POLLINATIONS FALLBACK) ──
 POLLINATIONS_API_KEY = os.environ.get("POLLINATIONS_API_KEY", "")
 
-def analyze_image_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> str:
+def analyze_image_bytes(image_bytes: bytes, mime_type: str = "image/jpeg", user_id: int = 0) -> str:
     """Analyze Discord attachment image using Gemini Vision (primary) or Pollinations (fallback)."""
     if not image_bytes:
         return ""
+
+    # Check for personal BYOK image key or chat key
+    user_keys = key_vault.get_user_keys(user_id) if user_id else {}
+    active_pollinations_key = user_keys.get("image_key") or POLLINATIONS_API_KEY
+    user_gemini_key = user_keys.get("chat_key")
 
     # 1. Pre-compress and resize image with PIL if large to prevent timeouts and payload errors
     processed_bytes = image_bytes
@@ -745,11 +752,11 @@ def analyze_image_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> st
     b64_img = base64.b64encode(processed_bytes).decode("utf-8")
 
     # ── ENGINE 1: POLLINATIONS VISION (Primary) ──
-    if POLLINATIONS_API_KEY:
+    if active_pollinations_key:
         try:
             data_uri = f"data:{processed_mime};base64,{b64_img}"
             headers = {
-                "Authorization": f"Bearer {POLLINATIONS_API_KEY}",
+                "Authorization": f"Bearer {active_pollinations_key}",
                 "Content-Type": "application/json"
             }
             payload = {
@@ -786,7 +793,10 @@ def analyze_image_bytes(image_bytes: bytes, mime_type: str = "image/jpeg") -> st
             logging.error(f"[Vision AI Pollinations] Error: {pe}")
 
     # ── ENGINE 2: GEMINI VISION (Fallback) ──
-    keys = GEMINI_API_KEYS if GEMINI_API_KEYS else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
+    if user_gemini_key:
+        keys = [user_gemini_key]
+    else:
+        keys = GEMINI_API_KEYS if GEMINI_API_KEYS else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
     if keys:
         vision_prompt = "Analyze and describe this image clearly and concisely in 2-4 sentences. Note key details, text, objects, memes, gameplay, errors, or context that a Discord assistant should understand."
         vision_models = ["gemini-3-flash-preview", "gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-3.8-flash"]
@@ -1260,13 +1270,20 @@ def build_full_system_context(user_name: str, user_id: int = 0, is_admin: bool =
 
 
 def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool = False, is_owner_user: bool = False, target_guild: discord.Guild = None) -> str:
-    keys = GEMINI_API_KEYS if GEMINI_API_KEYS else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
+    # 🌟 BYOK (Bring Your Own Key) Support 🌟
+    user_keys = key_vault.get_user_keys(user_id) if user_id else {}
+    user_chat_key = user_keys.get("chat_key")
+    if user_chat_key:
+        keys = [user_chat_key]
+    else:
+        keys = GEMINI_API_KEYS if GEMINI_API_KEYS else ([GEMINI_API_KEY] if GEMINI_API_KEY else [])
+
     if not keys:
         # If Gemini is not configured, directly query Groq!
         groq_direct = query_groq(prompt, max_tokens=600)
         if groq_direct:
             return groq_direct
-        return "⚠️ Gemini & Groq API keys are not configured."
+        return "⚠️ Arre yaar! Aapka personal Gemini API key configured nahi hai. `/setup` type karke 10 second me apna free Gemini key jod lo!"
 
     context = build_full_system_context(user_name, user_id, is_admin, is_owner_user, target_guild)
     final_prompt = (
@@ -2317,7 +2334,7 @@ async def slash_ask(interaction: discord.Interaction, query: str, attachment: Op
             try:
                 img_bytes = await attachment.read()
                 mime = attachment.content_type or "image/jpeg"
-                desc = await asyncio.to_thread(analyze_image_bytes, img_bytes, mime)
+                desc = await asyncio.to_thread(analyze_image_bytes, img_bytes, mime, interaction.user.id)
                 if desc:
                     query = f"[USER ATTACHED IMAGE: {desc}]\n{query}"
             except Exception as e:
@@ -2552,6 +2569,70 @@ async def slash_audit(interaction: discord.Interaction):
         await interaction.followup.send(embed=embed, ephemeral=True)
     else:
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="setup", description="Link your personal API keys (Chat, Image, Coding) via secure web portal")
+async def slash_setup(interaction: discord.Interaction):
+    token = key_portal.generate_portal_token(
+        interaction.user.id,
+        interaction.user.name,
+        str(interaction.user.display_avatar.url)
+    )
+    base_url = RENDER_EXTERNAL_URL.rstrip('/') if RENDER_EXTERNAL_URL else f"http://127.0.0.1:{PORT}"
+    portal_url = f"{base_url}/setup?token={token}"
+
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(
+        label="🔑 Open Personal Key Portal",
+        url=portal_url,
+        style=discord.ButtonStyle.link,
+        emoji="⚡"
+    ))
+
+    embed = discord.Embed(
+        title="🔒 Tillu AI — Private Key Setup",
+        description=(
+            f"Hey **{interaction.user.name}**! Click below to open your **private setup dashboard**.\n\n"
+            "• **Private 15-Minute Link**: Secure & only visible to you.\n"
+            "• **3 Sections**: Chat (Gemini), Image (Pollinations), Coding & Tools.\n"
+            "• **Free Keys Available**: Direct 'Get Key' buttons inside for zero-cost setup!\n"
+            "• **Checkpoint History**: Your updates are saved as encrypted checkpoints."
+        ),
+        color=0x6366f1
+    )
+    embed.set_footer(text="Your keys are AES-encrypted and never visible to other users.")
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+
+@bot.command(name="setup", aliases=["keys", "setkeys", "portal"])
+async def cmd_setup(ctx):
+    token = key_portal.generate_portal_token(
+        ctx.author.id,
+        ctx.author.name,
+        str(ctx.author.display_avatar.url)
+    )
+    base_url = RENDER_EXTERNAL_URL.rstrip('/') if RENDER_EXTERNAL_URL else f"http://127.0.0.1:{PORT}"
+    portal_url = f"{base_url}/setup?token={token}"
+
+    view = discord.ui.View()
+    view.add_item(discord.ui.Button(
+        label="🔑 Open Personal Key Portal",
+        url=portal_url,
+        style=discord.ButtonStyle.link,
+        emoji="⚡"
+    ))
+
+    embed = discord.Embed(
+        title="🔒 Tillu AI — Private Key Setup",
+        description="Click below to open your setup portal (link expires in 15 mins).",
+        color=0x6366f1
+    )
+    embed.set_footer(text="Use slash command /setup in any channel for complete privacy.")
+    try:
+        await ctx.author.send(embed=embed, view=view)
+        await ctx.reply("📨 I have sent your private setup portal link to your DMs!", delete_after=10)
+    except Exception:
+        await ctx.reply(embed=embed, view=view)
+
 
 @bot.tree.command(name="help", description="Show Tillu bot commands & features")
 async def slash_help(interaction: discord.Interaction):
@@ -2866,7 +2947,7 @@ async def cmd_tillu(ctx, *, query: str = None):
                 try:
                     img_bytes = await att.read()
                     mime = att.content_type or "image/jpeg"
-                    desc = await asyncio.to_thread(analyze_image_bytes, img_bytes, mime)
+                    desc = await asyncio.to_thread(analyze_image_bytes, img_bytes, mime, ctx.author.id)
                     if desc:
                         image_descs.append(desc)
                 except Exception as e:
@@ -3681,7 +3762,7 @@ async def on_message(message: discord.Message):
                 try:
                     img_bytes = await att.read()
                     mime = att.content_type or ("image/png" if att.filename.lower().endswith(".png") else "image/jpeg")
-                    desc = await asyncio.to_thread(analyze_image_bytes, img_bytes, mime)
+                    desc = await asyncio.to_thread(analyze_image_bytes, img_bytes, mime, message.author.id)
                     if desc:
                         image_descs.append(desc)
                 except Exception as e:
@@ -3771,11 +3852,13 @@ async def start_web_server():
     app = web.Application()
     app.router.add_get('/', health_handler)
     app.router.add_get('/healthz', health_handler)
+    # Register Ephemeral Key Portal Routes (/setup, /api/test-key, /api/save-keys)
+    key_portal.register_portal_routes(app)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    logging.info(f"[OK] Health Check Web Server running on port {PORT}")
+    logging.info(f"[OK] Health Check & Key Portal Web Server running on port {PORT}")
 
 async def render_keepalive_loop():
     await asyncio.sleep(30)
