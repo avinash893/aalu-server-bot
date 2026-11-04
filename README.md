@@ -1,110 +1,61 @@
-# 🤖 Tillu — Smart AI Co-Host & Minecraft Community Manager
+# Tillu — Stream Co-Host & Community Assistant
 
-Tillu is an autonomous, witty Hinglish AI co-host and Discord community manager. Powered by **NVIDIA AI** (with auto-rolling API keys) and **Groq fallback**, Tillu handles Minecraft server operations, self-service whitelisting, live server telemetry, and Discord administration.
-
----
-
-## ⚡ Features
-
-- 🎭 **Dual-Tone Hinglish AI**: Casual banter, meme culture, and humor for chat; sharp, professional execution for admin tasks.
-- 🚀 **High-Speed AI Architecture**: Powered by NVIDIA API with automatic 5–10 use rolling keys and instant Groq fallback.
-- 🎮 **Minecraft Telemetry & Controls**: Real-time status ping, player count display, remote server start via Pterodactyl API, and self-service player whitelisting.
-- 🧠 **Persistent Cloud Memory**: Learns rules, facts, and moderation preferences with continuous GitHub cloud synchronization.
-- 🛡️ **Autonomous Discord Actions**: Give/remove roles, kick/ban members, create channels, and enforce custom server rules via natural language.
+Tillu is an autonomous Hinglish AI co-host and Discord community manager built for @AALU_CHIPAS. Powered by Google Antigravity, Gemini AI, NVIDIA, and Groq fallback, Tillu handles YouTube live timings, member discovery, public gaming telemetry, inter-bot delegation, and dynamic personality responses.
 
 ---
 
-## 📖 Usage
+## Features
 
-### 1. Chatting with Tillu
-You can talk to Tillu anywhere in your server:
-- Mention `@Tillu` or simply type `tillu <your message>` in chat.
-- Ask questions about the Minecraft server, request a whitelist, or chat naturally in Hinglish.
-- Tillu automatically detects intent and executes actions or answers questions.
+- Dynamic Personality Engine: Switches dynamically between Sarcastic, Funny, Sad Sarcastic, Wholesome, and Savage tones.
+- YouTube Live Tracking: Real-time stream timings and live broadcast detection via the YouTube Data API.
+- Member Directory & Tagging: Look up server members by role or name and tag them cleanly in chat.
+- Gaming Presence Telemetry: Tracks games played by server members using public Discord activities into an ongoing history.
+- Inter-Bot Orchestration: Dispatches commands to other bots in the server (music bots, utilities, moderation).
+- Autonomous Daily Self-Audit: Performs 5 daily cycles auditing task success, bot capabilities, and evolution rules synced with GitHub.
+- Cloud Memory Diary: Remembers server facts, streamer preferences, and rules with automatic GitHub persistence.
 
-### 2. Slash Commands
+---
+
+## Slash Commands
 
 | Command | Description | Permission |
 | :--- | :--- | :--- |
-| `/start` | Starts the Minecraft server via Pterodactyl API | Everyone |
-| `/status` | Shows live server status, TPS, and player count | Everyone |
-| `/whitelist <ign>` | Adds your Minecraft username to the whitelist | Everyone |
-| `/ask <query>` | Asks Tillu anything about the server or SMP | Everyone |
-| `/tts <message>` | Makes Tillu speak out loud via Discord TTS | Everyone |
+| `/livetiming` | Checks YouTube live stream timings and status for @AALU_CHIPAS | Everyone |
+| `/members [role]` | Lists community members with an optional role filter | Everyone |
+| `/tagmember <name>` | Finds a member by name/query and mentions them | Everyone |
+| `/gamehistory [@user]` | Shows games played by a member based on Discord activity | Everyone |
+| `/topgames` | Displays leaderboard of games played across the server | Everyone |
+| `/usebot <command>` | Commands or delegates a task to another bot | Admin / Mod |
+| `/mood [mood_name]` | Views or sets Tillu's active personality tone | Everyone / Staff |
+| `/status` | Checks Tillu bot health and stream status | Everyone |
+| `/ask <query>` | Asks Tillu anything about the community or stream | Everyone |
 | `/remember <fact>` | Teaches Tillu a rule or fact to remember | Admin / Mod |
-| `/memories` | Displays all learned facts and server rules | Everyone |
-| `/console <cmd>` | Executes a command on the server console | Admin / Mod |
-| `/ban <player>` | Bans a player from the Minecraft server | Admin / Mod |
-| `/unban <player>` | Unbans a player from the Minecraft server | Admin / Mod |
-| `/unwhitelist <ign>` | Removes a player from the whitelist | Admin / Mod |
-| `/tag <target> <msg>` | Tags a user or role with a message | Admin / Mod |
-| `/listbots` | Lists all other active bots in the server | Everyone |
-| `/help` | Displays help menu with all available commands | Everyone |
-
-### 3. Natural Language Actions
-Admins can speak naturally to Tillu in chat:
-- *"Give Member role to @user"*
-- *"Tillu, check kitne players online hain"*
-- *"Whitelist player Alex"*
-- *"Server start kar do"*
+| `/memories` | Displays all learned facts and community rules | Everyone |
+| `/audit` | Triggers an immediate self-reflection audit and report | Admin / Mod |
+| `/help` | Displays interactive help menu with quick action buttons | Everyone |
 
 ---
 
-## ➕ How to Add Tillu to Your Own Server
+## Configuration (.env)
 
-### Option A: 1-Click Bot Invite (Recommended)
-Add the hosted Tillu bot directly to your Discord server:
-
-1. Click the **[Invite Tillu to Your Server](https://discord.com/api/oauth2/authorize?client_id=1530717587212603402&permissions=8&scope=bot%20applications.commands)** link.
-2. Select your Discord server from the dropdown.
-3. Keep the requested permissions checked (Administrator or Bot + Manage Roles + Send Messages).
-4. Click **Authorize**.
-5. Move the `Tillu` role above the roles it needs to manage in **Server Settings > Roles**.
-
----
-
-### Option B: Self-Host Your Own Instance
-
-#### 1. Clone the Repository
-```bash
-git clone https://github.com/avinash893/aalu-server-bot.git
-cd aalu-server-bot
-```
-
-#### 2. Install Dependencies
-```bash
-pip install -r requirements.txt
-```
-
-#### 3. Configure `.env`
-Create a `.env` file in the project root:
 ```env
-# Discord Configuration
-BOT_TOKEN=your_discord_bot_token_here
+# Discord Bot
+BOT_TOKEN=your_discord_bot_token
 
-# AI Engines (NVIDIA Primary + Groq Fallback)
-NVIDIA_API_KEYS=nvapi-key1,nvapi-key2,nvapi-key3
-GROQ_API_KEYS=gsk_key1,gsk_key2,gsk_key3
+# Streamer / YouTube Tracking
+YOUTUBE_API_KEY=your_youtube_data_api_v3_key
+YOUTUBE_CHANNEL_ID=UCS__Q82af4iKTPDwDQ19UZQ
 
-# Minecraft & Pterodactyl Integration
-SERVER_HOST=your.server.ip
-SERVER_PORT=25565
-PTERO_URL=https://panel.example.com
-PTERO_API_KEY=ptlc_your_client_api_key
-PTERO_SERVER_ID=your_server_uuid
+# AI Providers
+GEMINI_API_KEYS=key1,key2
+NVIDIA_API_KEYS=nvapi-key1,nvapi-key2
+GROQ_API_KEYS=gsk-key1,gsk-key2
 
-# GitHub Auto-Sync (Optional - for persistent cloud memory)
-GITHUB_TOKEN=ghp_your_github_token
-GITHUB_REPO=your_username/your_repo
+# Antigravity Hybrid Bridge (Optional)
+ANTIGRAVITY_PORT=8000
+ANTIGRAVITY_TOKEN=optional_token
+
+# GitHub Cloud Sync (for persistent memory diary)
+GITHUB_TOKEN=ghp_your_token
+GITHUB_REPO=avinash893/aalu-server-bot
 ```
-
-#### 4. Run the Bot
-```bash
-python bot.py
-```
-
-#### 5. 24/7 Hosting (Free on Wispbyte)
-1. Create a free **Python** server on [Wispbyte](https://wispbyte.com).
-2. Upload the project files and extract them.
-3. Select `bot.py` as the main entry file.
-4. Click **Start** in the console.

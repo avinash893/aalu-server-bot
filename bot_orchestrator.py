@@ -273,3 +273,38 @@ class BotOrchestrator:
             lines.append("Emit: BOT_COMMAND: <exact_prefixed_command_or_instructions>")
             lines.append("Tillu will automatically dispatch or assist the user with that bot!")
             return "\n".join(lines)
+
+    async def execute_bot_command(
+        self,
+        channel: discord.TextChannel,
+        bot_query: str,
+        command_body: str
+    ) -> Tuple[bool, str]:
+        """
+        Executes or relays a command meant for another bot in the current channel.
+        Prefixes the command with the target bot's native prefix if needed.
+        """
+        target_bot = self.get_bot_by_name(bot_query)
+        clean_cmd = command_body.strip()
+
+        if target_bot:
+            prefixes = target_bot.get("prefix", ["!"])
+            preferred_prefix = prefixes[0] if prefixes else "!"
+            # Ensure proper prefix
+            if not any(clean_cmd.startswith(p) for p in prefixes) and not clean_cmd.startswith("/"):
+                formatted_cmd = f"{preferred_prefix}{clean_cmd}"
+            else:
+                formatted_cmd = clean_cmd
+            target_name = target_bot.get("name", bot_query)
+        else:
+            formatted_cmd = clean_cmd
+            target_name = bot_query
+
+        try:
+            # Send the command into the text channel so the target bot catches the message
+            await channel.send(formatted_cmd)
+            return True, f"Dispatched `{formatted_cmd}` for **{target_name}**"
+        except Exception as e:
+            logger.error(f"Failed to dispatch inter-bot command: {e}")
+            return False, str(e)
+

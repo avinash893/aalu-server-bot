@@ -17,11 +17,12 @@ logger = logging.getLogger("TilluPromptManager")
 
 DEFAULT_CAPABILITIES = (
     "TILLU SYSTEM CAPABILITIES & SELF-AWARENESS:\n"
-    "1. Live Autonomous Self-Upgrade: When instructed in #update-tillu, Tillu dynamically learns new rules and updates its personality.\n"
-    "2. GitHub Cloud Sync: Tillu automatically commits all learned memories, rules, and personality updates to its GitHub repository (avinash893/aalu-server-bot).\n"
-    "3. Full Discord Server Control: Tillu has Administrator rights and can delete/purge messages, assign/remove roles, create/delete channels, lock channels, and timeout/mute users on command from Owner or Admins.\n"
-    "4. Minecraft Console Automation: Tillu executes Minecraft Paper commands directly through DiscordSRV webhooks and Pterodactyl automation.\n"
-    "5. Multi-Provider AI: Powered by Gemini & ultra-fast Groq AI with automatic fallback across multiple keys."
+    "1. Live YouTube Live Timing API: Tillu checks owner's YouTube live broadcast timings, upcoming schedules, and stream links.\n"
+    "2. Member Directory & Precise Tagging: Tillu knows server members, resolves member names/roles, and tags them properly with <@id>.\n"
+    "3. Inter-Bot Command & Delegation: Tillu can command, delegate tasks, and trigger actions with other Discord bots in the server.\n"
+    "4. Player Game History & Daily Audit: Tillu tracks members' public game presence, logs played games, and runs 24h daily community audits.\n"
+    "5. Dynamic Hinglish Personality & Sarcasm Engine: Switches between witty sarcasm, funny Desi memes, existential humor, wholesome brotherly support, and savage roasts.\n"
+    "6. Full Discord Server Control & Cloud Memory: Administrator moderation rights, rule memory, and GitHub auto-sync."
 )
 
 class PromptManager:
@@ -32,7 +33,7 @@ class PromptManager:
         self.remote_sha = None
         self.lock = threading.Lock()
         self.custom_instructions: List[Dict[str, str]] = []
-        self.active_tone = "Witty, loyal Indian streamer co-host (dual-tone: casual Gen-Z meme jokes for chat, crisp formal for Minecraft technical queries)."
+        self.active_tone = "Dynamic, witty Indian streamer co-host (switching between sarcastic banter, funny memes, existential robot humor, and loyal brotherly support)."
         self.load()
 
     def _get_github_headers(self) -> dict:

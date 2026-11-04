@@ -1,25 +1,29 @@
 """
-Tillu Context & Intent Classifier
-Intelligently differentiates whether a user's request is meant for:
-1. MINECRAFT (in-game actions, Paper/Bedrock console, whitelist, player telemetry, server power)
-2. DISCORD (channel/role/category management, Discord moderation, purge, timeouts, Discord bans)
-3. INTER_BOT (discovering, learning, controlling, or delegating tasks to other Discord bots)
-4. MEMORY (facts to remember, learn, or recall)
-5. GENERAL_CHAT (Hinglish conversation, streaming co-host jokes, memes, Q&A)
+Tillu Context & Intent Classifier (Streamer & Community Edition)
+Intelligently differentiates user intent across:
+1. YOUTUBE_LIVE (Owner stream timings, live status, upcoming broadcast schedule)
+2. MEMBER_DIR (Listing server members, searching members, formatting <@id> tags)
+3. INTER_BOT (Discovering, commanding, or delegating tasks to other Discord bots)
+4. PLAYER_ANALYTICS (Member gaming history, played games, server game stats)
+5. DISCORD (Roles, channels, moderation, purge, server settings)
+6. MEMORY / RULE (Remembering facts, learning guidelines)
+7. GENERAL_CHAT (Hinglish conversation with dynamic mood engine)
 """
 
 import re
 import json
 import logging
 from enum import Enum
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 logger = logging.getLogger("TilluContextClassifier")
 
 class TargetSystem(str, Enum):
-    MINECRAFT = "MINECRAFT"
-    DISCORD = "DISCORD"
+    YOUTUBE_LIVE = "YOUTUBE_LIVE"
+    MEMBER_DIR = "MEMBER_DIR"
     INTER_BOT = "INTER_BOT"
+    PLAYER_ANALYTICS = "PLAYER_ANALYTICS"
+    DISCORD = "DISCORD"
     MEMORY = "MEMORY"
     RULE = "RULE"
     GENERAL_CHAT = "GENERAL_CHAT"
@@ -55,7 +59,7 @@ class ClassificationResult:
         return f"<ClassificationResult system={self.system.value} action={self.action} conf={self.confidence:.2f}>"
 
 
-# ── Explicit Keyword Indicators ──────────────────────────────────────────────
+# Keyword Indicators
 DISCORD_KEYWORDS = {
     "role", "roles", "channel", "channels", "category", "categories",
     "purge", "clear chat", "delete messages", "delete chats", "clear messages",
@@ -65,64 +69,60 @@ DISCORD_KEYWORDS = {
     "in discord", "discord server", "server icon", "server name", "rename server"
 }
 
-MINECRAFT_KEYWORDS = {
-    "minecraft", "mc", "in-game", "in game", "ingame", "paper", "spigot", "bukkit",
-    "bedrock", "java", "geyser", "floodgate", "ign", "whitelist", "whitelisted",
-    "unwhitelist", "console", "rcon", "tps", "gamemode", "tp", "teleport", "coords",
-    "oneblock", "one block", "smp", "hexacraft", "pterodactyl", "panel", "server ip",
-    "server port", "mc port", "mc ip", "spawn", "kit", "arena", "superheroes",
-    "op", "deop", "say", "give", "kill", "time set", "weather", "datapack"
+YOUTUBE_LIVE_KEYWORDS = {
+    "live", "stream", "timing", "schedule", "yt", "youtube", "aalu live",
+    "kab aayega", "stream kab", "live kab", "live timing", "stream timing",
+    "broadcast", "kitne baje", "stream time", "live status", "is aalu live"
 }
 
-INTER_BOT_KEYWORDS = {
-    "tell bot", "ask bot", "command bot", "run bot", "use bot", "bot command",
-    "delegate to", "using bot", "play song", "play music", "warn user with",
-    "ticket tool", "dyno", "probot", "mee6", "carl-bot", "fredboat", "hydra"
+MEMBER_KEYWORDS = {
+    "member", "members", "tag karo", "tag them", "ping karo", "who all",
+    "kaun kaun", "list members", "sabko tag", "tag member", "tag all"
+}
+
+PLAYER_ANALYTICS_KEYWORDS = {
+    "game history", "what does he play", "kaunsa game khelta", "games played",
+    "game stats", "top games", "khelte hain", "khelta hai", "most played",
+    "gaming history", "active games", "currently playing"
 }
 
 
-def classify_request(
+def classify_intent(
     query: str,
     channel_name: str = "",
     channel_id: int = 0,
     has_discord_mention: bool = False,
-    known_bot_names: Optional[list] = None
+    known_bot_names: Optional[List[str]] = None
 ) -> ClassificationResult:
     """
     High-precision deterministic and heuristic classifier that resolves whether
-    a user's prompt is targeting Minecraft, Discord, an external Bot, or General Chat.
+    a user's prompt is targeting YouTube Live, Member Tagging, Another Bot,
+    Player Game Analytics, Discord Admin, Memory, or General Chat.
     """
     q_clean = query.strip()
     q_lower = q_clean.lower()
     known_bots = [b.lower() for b in (known_bot_names or [])]
 
-    # 1. CHANNEL CONTEXT SHORT-CIRCUITS
-    ch_lower = channel_name.lower()
-    if "whitelist" in ch_lower:
-        # Check if user sent a raw IGN or whitelist request
-        ign_match = re.search(r'^(?:!wl\s+|!whitelist\s+|whitelist\s+me\s+)?([a-zA-Z0-9_.* ]{3,20})$', q_clean)
-        if ign_match:
-            return ClassificationResult(
-                system=TargetSystem.MINECRAFT,
-                action="whitelist_add",
-                confidence=0.99,
-                reasoning="Message in dedicated whitelist channel with IGN pattern.",
-                parameters={"ign": ign_match.group(1).strip()}
-            )
-
-    if "console" in ch_lower:
+    # 1. YOUTUBE LIVE & STREAM TIMING
+    if any(k in q_lower for k in ["live kab", "stream kab", "live timing", "stream timing", "live status", "aalu live"]):
         return ClassificationResult(
-            system=TargetSystem.MINECRAFT,
-            action="mc_console_command",
+            system=TargetSystem.YOUTUBE_LIVE,
+            action="get_live_timing",
+            confidence=0.98,
+            reasoning="User explicitly asked for owner YouTube live stream timing or status."
+        )
+
+    if any(k in q_lower for k in ["live", "stream"]) and any(k in q_lower for k in ["kab", "timing", "time", "schedule", "aayega", "shuru", "aata hai"]):
+        return ClassificationResult(
+            system=TargetSystem.YOUTUBE_LIVE,
+            action="get_live_timing",
             confidence=0.95,
-            reasoning="Command dispatched directly inside Minecraft console channel.",
-            parameters={"raw_command": q_clean}
+            reasoning="Pattern matches query about stream schedule or live broadcast timing."
         )
 
     # 2. INTER-BOT DELEGATION DETECTION
     for bot_name in known_bots:
-        if bot_name in q_lower:
-            # Pattern like "tell <bot> to <action>" or "<bot> play <song>" or "use <bot> for <action>"
+        if bot_name in q_lower and bot_name != "tillu":
             pattern = rf'\b(?:tell|ask|use|run|command)\s+{re.escape(bot_name)}\s+(?:to\s+)?(.+)'
             m = re.search(pattern, q_lower)
             if m:
@@ -143,230 +143,125 @@ def classify_request(
                     parameters={"bot_name": bot_name, "instruction": m2.group(1).strip()}
                 )
 
-    # 3. DISCORD MODERATION DISAMBIGUATION (Ban / Kick / Mute / Timeout)
-    # Critical distinction: Ban with @mention is ALWAYS Discord, Ban with alphanumeric IGN is Minecraft.
+    # 3. PLAYER GAME HISTORY & ANALYTICS
+    if any(k in q_lower for k in ["game history", "gaming history", "games played", "top games"]):
+        return ClassificationResult(
+            system=TargetSystem.PLAYER_ANALYTICS,
+            action="player_history" if has_discord_mention else "top_games",
+            confidence=0.95,
+            reasoning="Query matches player game history or top played games analytics."
+        )
+
+    if any(k in q_lower for k in ["kya khelta hai", "kaunsa game khelta", "khel raha hai"]) and (has_discord_mention or "all" in q_lower or "sab" in q_lower):
+        return ClassificationResult(
+            system=TargetSystem.PLAYER_ANALYTICS,
+            action="player_history",
+            confidence=0.92,
+            reasoning="Query asking what game a member or members play."
+        )
+
+    # 4. MEMBER DIRECTORY & TAGGING
+    if any(k in q_lower for k in ["who all are the member", "who are the members", "kaun kaun members", "list members", "sab members", "member list"]):
+        return ClassificationResult(
+            system=TargetSystem.MEMBER_DIR,
+            action="list_members",
+            confidence=0.96,
+            reasoning="Query asking for server member directory."
+        )
+
+    tag_match = re.search(r'\b(?:tag|ping)\s+([^\n\r]+)', q_lower)
+    if tag_match and not any(k in q_lower for k in ["role", "channel"]):
+        return ClassificationResult(
+            system=TargetSystem.MEMBER_DIR,
+            action="tag_member",
+            confidence=0.92,
+            reasoning="User instructed Tillu to tag or ping a member.",
+            parameters={"target": tag_match.group(1).strip()}
+        )
+
+    # 5. DISCORD MODERATION & MANAGEMENT
     discord_mention_pattern = r'<@!?[0-9]+>'
     has_mention_in_text = bool(re.search(discord_mention_pattern, q_clean)) or has_discord_mention
 
     # BAN:
     ban_match = re.search(r'\b(?:ban|nikal\s+do|hata\s+do)\s+([^\n\r]+)', q_clean, re.IGNORECASE)
-    if ban_match:
-        target_str = ban_match.group(1).strip()
-        # Explicit Discord context words
-        if any(w in q_lower for w in ["from discord", "in discord", "server ban", "discord se", "discord ban"]):
-            return ClassificationResult(
-                system=TargetSystem.DISCORD,
-                action="discord_ban",
-                confidence=0.98,
-                reasoning="User explicitly specified Discord ban.",
-                parameters={"target": target_str}
-            )
-        # If targeting a Discord @mention or Discord ID
-        if has_mention_in_text or re.match(r'^\d{17,20}$', target_str):
-            return ClassificationResult(
-                system=TargetSystem.DISCORD,
-                action="discord_ban",
-                confidence=0.95,
-                reasoning="Target contains a Discord user mention or Discord user ID.",
-                parameters={"target": target_str}
-            )
-        # Explicit Minecraft context words
-        if any(w in q_lower for w in ["in mc", "in minecraft", "mc ban", "game se", "minecraft se", "console"]):
-            return ClassificationResult(
-                system=TargetSystem.MINECRAFT,
-                action="mc_ban",
-                confidence=0.98,
-                reasoning="User explicitly specified Minecraft in-game ban.",
-                parameters={"target": target_str}
-            )
-        # If target looks like a pure Minecraft IGN (no spaces, 3-16 chars alphanumeric)
-        clean_ign = re.sub(r'["\']', '', target_str).split()[0]
-        if re.match(r'^[a-zA-Z0-9_]{3,16}$', clean_ign):
-            return ClassificationResult(
-                system=TargetSystem.MINECRAFT,
-                action="mc_ban",
-                confidence=0.85,
-                reasoning="Target matches standard Minecraft IGN syntax without Discord mention.",
-                parameters={"ign": clean_ign}
-            )
+    if ban_match and has_mention_in_text:
+        return ClassificationResult(
+            system=TargetSystem.DISCORD,
+            action="discord_ban",
+            confidence=0.98,
+            reasoning="Discord user mention provided for ban action.",
+            parameters={"target": ban_match.group(1).strip()}
+        )
 
     # KICK:
     kick_match = re.search(r'\b(?:kick)\s+([^\n\r]+)', q_clean, re.IGNORECASE)
-    if kick_match:
-        target_str = kick_match.group(1).strip()
-        if any(w in q_lower for w in ["from discord", "in discord", "discord se"]):
-            return ClassificationResult(
-                system=TargetSystem.DISCORD,
-                action="discord_kick",
-                confidence=0.98,
-                reasoning="User explicitly specified Discord kick.",
-                parameters={"target": target_str}
-            )
-        if has_mention_in_text or re.match(r'^\d{17,20}$', target_str):
-            return ClassificationResult(
-                system=TargetSystem.DISCORD,
-                action="discord_kick",
-                confidence=0.95,
-                reasoning="Kick target is a Discord mention or Discord user ID.",
-                parameters={"target": target_str}
-            )
-        clean_ign = re.sub(r'["\']', '', target_str).split()[0]
-        if re.match(r'^[a-zA-Z0-9_]{3,16}$', clean_ign):
-            return ClassificationResult(
-                system=TargetSystem.MINECRAFT,
-                action="mc_kick",
-                confidence=0.85,
-                reasoning="Kick target matches Minecraft IGN syntax.",
-                parameters={"ign": clean_ign}
-            )
-
-    # TIMEOUT / MUTE:
-    if re.search(r'\b(?:timeout|mute|shant\s+kar|chup\s+kar)\b', q_lower):
-        if any(w in q_lower for w in ["in discord", "discord se", "voice", "vc", "chats?"]) or has_mention_in_text:
-            return ClassificationResult(
-                system=TargetSystem.DISCORD,
-                action="discord_timeout",
-                confidence=0.95,
-                reasoning="Mute/timeout directed at a Discord user or channel.",
-                parameters={"query": q_clean}
-            )
-        if any(w in q_lower for w in ["in mc", "in minecraft", "game me"]):
-            return ClassificationResult(
-                system=TargetSystem.MINECRAFT,
-                action="mc_console_command",
-                confidence=0.90,
-                reasoning="Mute requested in Minecraft game server.",
-                parameters={"raw_command": f"mute {q_clean}"}
-            )
-
-    # 4. DISCORD SERVER & ROLE & CHANNEL MANAGEMENT
-    # Purge / Clear messages
-    if re.search(r'\b(?:purge|clear|delete)\s+(\d+)\s*(?:messages?|chats?|msg)?\b', q_lower) or re.search(r'\b(?:delete|clear)\s+(?:last\s+)?(\d+)\b', q_lower):
+    if kick_match and has_mention_in_text:
         return ClassificationResult(
             system=TargetSystem.DISCORD,
-            action="discord_purge",
-            confidence=0.99,
-            reasoning="Clear/purge message command is exclusively a Discord action."
+            action="discord_kick",
+            confidence=0.98,
+            reasoning="Discord user mention provided for kick action.",
+            parameters={"target": kick_match.group(1).strip()}
         )
 
-    # Roles / Channels / Categories
-    discord_structural_words = ["role", "roles", "channel", "channels", "category", "categories", "backup server", "lock channel", "unlock channel", "slowmode"]
-    if any(re.search(rf'\b{w}\b', q_lower) for w in discord_structural_words):
-        # Exclude Minecraft in-game roles/kits like "superhero kit"
-        if not any(mc in q_lower for mc in ["kit", "superhero", "arena class", "mc role"]):
-            return ClassificationResult(
-                system=TargetSystem.DISCORD,
-                action="discord_management",
-                confidence=0.95,
-                reasoning="Command targets Discord server structure (role/channel/category/backup)."
-            )
-
-    # 5. MINECRAFT WHITELIST / PLAYERS / POWER / STATUS / CLAIMS
-    # 5.1 Claim Land / Claim Blocks (GriefPrevention)
-    if re.search(r'\b(?:claim\s*(?:land|blocks?|claims?)?|land\s*claims?|unlimited\s+claims?|claims?|griefprevention|adjustbonusclaimblocks|acb|scb)\b', q_lower):
-        if not any(w in q_lower for w in ["drop", "vault", "reward"]):
-            return ClassificationResult(
-                system=TargetSystem.MINECRAFT,
-                action="mc_claim_blocks",
-                confidence=0.98,
-                reasoning="Command targets Minecraft GriefPrevention claim land or bonus claim blocks.",
-                parameters={"query": q_clean}
-            )
-
-    # 5.2 Explicit Minecraft In-Game Actions
-    if any(w in q_lower for w in ["in minecraft", "in mc", "in game", "ingame", "minecraft me", "mc me"]):
+    # MUTE / TIMEOUT:
+    timeout_match = re.search(r'\b(?:mute|timeout|shant\s+kar)\s+([^\n\r]+)', q_clean, re.IGNORECASE)
+    if timeout_match and has_mention_in_text:
         return ClassificationResult(
-            system=TargetSystem.MINECRAFT,
-            action="mc_game_action",
-            confidence=0.96,
-            reasoning="Command explicitly specifies Minecraft in-game execution context.",
-            parameters={"query": q_clean}
+            system=TargetSystem.DISCORD,
+            action="discord_timeout",
+            confidence=0.98,
+            reasoning="Discord user mention provided for timeout/mute action.",
+            parameters={"target": timeout_match.group(1).strip()}
         )
 
-    # Whitelist
-    if re.search(r'\b(?:whitelist|whitelisted|wl)\b', q_lower):
+    # PURGE / DELETE MESSAGES:
+    if any(k in q_lower for k in ["purge", "clear chat", "delete messages", "clear messages"]):
+        m_count = re.search(r'\b(\d+)\b', q_clean)
+        count = int(m_count.group(1)) if m_count else 10
         return ClassificationResult(
-            system=TargetSystem.MINECRAFT,
-            action="whitelist_request",
+            system=TargetSystem.DISCORD,
+            action="purge_messages",
+            confidence=0.98,
+            reasoning="Request to purge or clear Discord messages.",
+            parameters={"count": count}
+        )
+
+    # ROLES & CHANNELS:
+    if any(k in q_lower for k in ["create role", "give role", "remove role", "delete role", "create channel", "lock channel", "unlock channel"]):
+        return ClassificationResult(
+            system=TargetSystem.DISCORD,
+            action="discord_admin_action",
             confidence=0.95,
-            reasoning="Whitelist actions strictly pertain to Minecraft server access."
-        )
-
-    # Server Power (Start / Stop / Restart)
-    if re.search(r'\b(?:start|boot|chalu|on\s*kar|turn\s*on|restart|reboot)\b', q_lower):
-        if any(w in q_lower for w in ["server", "minecraft", "mc", "game", "panel", "hexacraft"]):
-            return ClassificationResult(
-                system=TargetSystem.MINECRAFT,
-                action="server_power",
-                confidence=0.95,
-                reasoning="Server power action targets the Minecraft game server."
-            )
-
-    # Server Status / Health
-    if re.search(r'\b(?:status|online\s+hai|chalu\s+hai|chal\s+raha\s+hai|health)\b', q_lower):
-        if any(w in q_lower for w in ["server", "mc", "minecraft", "game"]):
-            return ClassificationResult(
-                system=TargetSystem.MINECRAFT,
-                action="server_status",
-                confidence=0.95,
-                reasoning="Query asks for Minecraft server status or online health."
-            )
-
-    # Player count / online players
-    if re.search(r'\b(?:players?|who\s+is\s+(?:playing|online)|kaun\s+khel\s+raha|kitne\s+players?|kitne\s+log\s+khel)\b', q_lower):
-        return ClassificationResult(
-            system=TargetSystem.MINECRAFT,
-            action="mc_players",
-            confidence=0.95,
-            reasoning="Query asks for active players in the Minecraft server."
-        )
-
-    # Server IP / Port / Connection
-    if re.search(r'\b(?:ip|port|address|kaise\s+join\s+kare|how\s+to\s+join|server\s+version)\b', q_lower):
-        return ClassificationResult(
-            system=TargetSystem.MINECRAFT,
-            action="mc_connection_info",
-            confidence=0.95,
-            reasoning="Query asks for Minecraft server connection details."
-        )
-
-    # Minecraft In-Game Telemetry / Mechanics (tps, coords, oneblock, smp, lag)
-    if any(re.search(rf'\b{re.escape(w)}\b', q_lower) for w in ["tps", "coords", "coordinates", "oneblock", "smp", "gamemode", "datapack", "spigot", "paper"]):
-        return ClassificationResult(
-            system=TargetSystem.MINECRAFT,
-            action="mc_telemetry" if ("tps" in q_lower or "lag" in q_lower) else "mc_inquiry",
-            confidence=0.92,
-            reasoning="Query references Minecraft gameplay mechanics, performance (TPS/lag), or coordinates."
+            reasoning="Discord server structure or role modification request."
         )
 
     # 6. MEMORY & RULES
-    if re.search(r'\b(?:yaad\s*(?:rakh|rakho|rakhna)|remember(?:\s*this)?|note\s*(?:this|down)|learn\s*this)\b', q_lower):
-        if re.search(r'\b(?:rule|niyam|law|karega|karna)\b', q_lower):
-            return ClassificationResult(
-                system=TargetSystem.RULE,
-                action="create_rule",
-                confidence=0.95,
-                reasoning="User instructed Tillu to memorize an autonomous behavioral rule."
-            )
+    if any(q_lower.startswith(prefix) for prefix in ["remember", "yaad rakh", "sikho", "learn rule", "add rule", "rule:"]):
         return ClassificationResult(
-            system=TargetSystem.MEMORY,
-            action="remember_fact",
-            confidence=0.95,
-            reasoning="User instructed Tillu to memorize a fact."
+            system=TargetSystem.RULE if "rule" in q_lower else TargetSystem.MEMORY,
+            action="store_rule" if "rule" in q_lower else "store_memory",
+            confidence=0.98,
+            reasoning="Explicit directive to store memory or rule."
         )
 
-    if re.search(r'\b(?:from\s+now\s+on|ab\s+se|whenever\s+someone|naya\s+rule)\b', q_lower):
+    # 7. MINECRAFT LEGACY QUERIES (HANDLED GRACEFULLY)
+    if any(k in q_lower for k in ["minecraft", "smp", "whitelist", "server ip", "paper mc", "hexacraft"]):
         return ClassificationResult(
-            system=TargetSystem.RULE,
-            action="create_rule",
+            system=TargetSystem.GENERAL_CHAT,
+            action="minecraft_server_deleted",
             confidence=0.90,
-            reasoning="User is establishing an autonomous behavioral rule."
+            reasoning="User asked about Minecraft server which has been shut down and deleted."
         )
 
-    # 7. DEFAULT TO GENERAL CHAT / AI CO-HOST
+    # 8. GENERAL CHAT (FALLBACK)
     return ClassificationResult(
         system=TargetSystem.GENERAL_CHAT,
-        action="general_chat",
-        confidence=0.80,
-        reasoning="General conversation, Q&A, Hinglish banter, or unconstrained query."
+        action="chat_reply",
+        confidence=0.85,
+        reasoning="Conversational query or banter meant for Tillu AI."
     )
+
+# Backward compatibility alias
+classify_request = classify_intent

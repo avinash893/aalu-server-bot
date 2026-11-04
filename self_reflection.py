@@ -241,12 +241,16 @@ class SelfReflectionEngine:
         prompt_mgr=None,
         rule_mgr=None,
         llm_reflection_fn=None,
-        notification_channel=None
+        notification_channel=None,
+        guild: Optional[discord.Guild] = None,
+        player_analytics=None,
+        bot_orchestrator=None,
+        memory_mgr=None
     ) -> Dict[str, Any]:
         """
-        Executes an audit cycle over recent tasks.
-        Evaluates task performance, extracts errors, formulates self-improvements,
-        injects dynamic instructions, and notifies staff.
+        Executes an audit cycle over recent tasks, server bots, and player game analytics.
+        Evaluates task performance, audits bot capabilities, updates player gaming history,
+        formulates self-improvements, and notifies staff.
         """
         tasks = self.telemetry.get_tasks_since(self.last_audit_time)
         if not tasks:
@@ -265,20 +269,46 @@ class SelfReflectionEngine:
             if not t.get("success") or t.get("error"):
                 error_logs.append(f"[{t.get('classified_system')}] Query: '{t.get('query')}' | Error: {t.get('error')}")
 
+        # Player Gaming Telemetry
+        player_metrics = {}
+        if player_analytics:
+            try:
+                if guild:
+                    player_analytics.scan_guild(guild)
+                player_metrics = player_analytics.get_daily_audit_metrics(guild)
+            except Exception as pe:
+                logger.warning(f"Error auditing player analytics: {pe}")
+
+        # Server Bots Telemetry
+        bot_metrics = {}
+        if bot_orchestrator and guild:
+            try:
+                active_bots = [m for m in guild.members if m.bot and m.id != guild.me.id]
+                online_bots = [m for m in active_bots if m.status != discord.Status.offline]
+                bot_metrics = {
+                    "total_bots": len(active_bots),
+                    "online_bots": len(online_bots),
+                    "bot_names": [b.name for b in active_bots]
+                }
+            except Exception as be:
+                logger.warning(f"Error auditing bots: {be}")
+
         ai_reflection_text = ""
         learned_improvement = ""
-        if llm_reflection_fn and (error_logs or total > 0):
+        if llm_reflection_fn and (error_logs or total > 0 or player_metrics):
             try:
+                top_g_str = ", ".join(f"{g[0]} ({g[1]} players)" for g in player_metrics.get("top_games", [])[:3])
                 ai_prompt = (
-                    f"Perform a self-audit on these recent Tillu Discord bot tasks:\n"
-                    f"- Total: {total}, Success: {successes}, Fails: {fails}, Rate: {rate}%\n"
-                    f"- System breakdown: {system_breakdown}\n"
-                    f"- Error samples: {error_logs[:5]}\n\n"
-                    f"1. Summarize any confusion between Minecraft vs Discord requests.\n"
+                    f"Perform a daily self-audit on Tillu Discord bot and server data:\n"
+                    f"- Tasks: {total}, Success Rate: {rate}%\n"
+                    f"- Intent breakdown: {system_breakdown}\n"
+                    f"- Server Bots: {bot_metrics.get('online_bots', 0)}/{bot_metrics.get('total_bots', 0)} online\n"
+                    f"- Community Top Games: {top_g_str or 'None recorded'}\n"
+                    f"- Error samples: {error_logs[:4]}\n\n"
+                    f"1. Summarize bot and community gaming health in 1 sentence.\n"
                     f"2. Suggest exactly 1 concrete behavioral instruction to improve robustness in 1-2 sentences."
                 )
                 ai_reflection_text = await asyncio.to_thread(llm_reflection_fn, ai_prompt)
-                # Extract suggested instruction
                 if "instruction:" in ai_reflection_text.lower():
                     m = re.search(r'instruction:\s*([^\n\r]+)', ai_reflection_text, re.IGNORECASE)
                     if m:
@@ -287,18 +317,29 @@ class SelfReflectionEngine:
                 logger.warning(f"Error generating AI reflection: {ae}")
 
         if not ai_reflection_text:
-            ai_reflection_text = f"Audit passed with {rate}% efficiency across {total} tasks. System stable."
+            ai_reflection_text = f"Audit passed with {rate}% efficiency across {total} tasks. Community gaming tracking active."
 
         # Automatically apply learned improvement into prompt manager
         if learned_improvement and prompt_mgr:
             try:
                 prompt_mgr.add_instruction(
-                    f"[Self-Audit #{self.audit_counter + 1}] {learned_improvement}",
+                    f"[Daily-Audit #{self.audit_counter + 1}] {learned_improvement}",
                     author="TilluSelfAudit"
                 )
                 logger.info(f"Injected self-learned improvement: {learned_improvement}")
             except Exception as ie:
                 logger.warning(f"Could not inject prompt improvement: {ie}")
+
+        # Store learned community insights in memory
+        if memory_mgr and player_metrics.get("top_games"):
+            try:
+                top_3 = ", ".join(g[0] for g in player_metrics.get("top_games", [])[:3])
+                memory_mgr.remember(
+                    f"Server community's most played games currently are: {top_3}. Members frequently play these games.",
+                    author="TilluDailyAudit"
+                )
+            except Exception:
+                pass
 
         audit_summary = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -308,6 +349,8 @@ class SelfReflectionEngine:
             "fail_count": fails,
             "success_rate": rate,
             "system_breakdown": system_breakdown,
+            "player_metrics": player_metrics,
+            "bot_metrics": bot_metrics,
             "errors_detected": len(error_logs),
             "ai_reflection": ai_reflection_text,
             "auto_learned_improvement": learned_improvement
@@ -318,21 +361,26 @@ class SelfReflectionEngine:
         # Notify Discord update channel if available
         if notification_channel:
             try:
+                top_games = player_metrics.get("top_games", [])
+                games_display = ", ".join(f"**{g[0]}** ({g[1]} players)" for g in top_games[:4]) or "*No game sessions recorded yet*"
+                bots_display = f"{bot_metrics.get('online_bots', 0)}/{bot_metrics.get('total_bots', 0)} Online" if bot_metrics else "None"
+
                 embed = discord.Embed(
-                    title=f"🧠 Tillu 5x Daily Self-Audit #{self.audit_counter}",
+                    title=f"📊 Tillu Daily Server & Player Audit #{self.audit_counter}",
                     description=(
-                        f"**Task Health Analysis (Every 4.8 Hours):**\n"
-                        f"• Tasks Evaluated: **{total}**\n"
-                        f"• Success Rate: **{rate}%** (`{successes}` OK / `{fails}` Failed)\n"
-                        f"• Intent Routing: `{json.dumps(system_breakdown)}`\n\n"
-                        f"**Diagnostics & Evolution:**\n> {ai_reflection_text[:800]}"
+                        f"**24-Hour Server, Bot & Gaming Intelligence Audit:**\n\n"
+                        f"• **Task Performance:** `{rate}%` ({successes}/{total} OK)\n"
+                        f"• **Server Bots Audited:** `{bots_display}`\n"
+                        f"• **Tracked Players:** `{player_metrics.get('total_players_tracked', 0)} members`\n"
+                        f"• **Community Top Games:** {games_display}\n\n"
+                        f"**🧠 AI Audit Reflection:**\n> {ai_reflection_text[:800]}"
                     ),
                     color=0x2ECC71 if rate >= 90 else 0xE67E22,
                     timestamp=discord.utils.utcnow()
                 )
                 if learned_improvement:
-                    embed.add_field(name="🚀 Auto-Learned Robustness Rule", value=f"`{learned_improvement}`", inline=False)
-                embed.set_footer(text=f"GitHub Synced • avinash893/aalu-server-bot • 5x Daily Self-Evolution Loop")
+                    embed.add_field(name="✨ Auto-Learned Robustness Rule", value=f"`{learned_improvement}`", inline=False)
+                embed.set_footer(text=f"Tillu Daily Self-Audit Engine • avinash893/aalu-server-bot")
                 await notification_channel.send(embed=embed)
             except Exception as ne:
                 logger.warning(f"Failed sending audit embed: {ne}")

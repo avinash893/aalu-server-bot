@@ -176,11 +176,18 @@ from discord_action_manager import parse_and_execute_discord_action
 from context_classifier import classify_request, TargetSystem, ClassificationResult
 from bot_orchestrator import BotOrchestrator
 from self_reflection import TaskTelemetryLogger, SelfReflectionEngine
-import minecraft_player_resolver as mc_resolver
 import antigravity_bridge
 from hot_reloader import HotReloader
+from youtube_tracker import YouTubeTracker
+from mood_engine import MoodEngine, TilluMood
+from player_analytics import PlayerAnalytics
+from member_directory import MemberDirectory
 
 hot_reloader = HotReloader()
+youtube_tracker = YouTubeTracker()
+mood_engine = MoodEngine()
+player_analytics = PlayerAnalytics()
+member_dir = MemberDirectory()
 
 prompt_mgr = PromptManager(
     token=os.environ.get("GITHUB_TOKEN", ""),
@@ -279,418 +286,55 @@ def check_cooldown(user, guild=None) -> tuple[bool, int]:
     user_cooldowns[user.id] = now
     return True, 0
 
-# ── LOCAL PERSISTENCE ────────────────────────────────────────────────────────
-def load_whitelist_registry() -> dict:
-    if os.path.exists(WHITELIST_REGISTRY_PATH):
-        try:
-            with open(WHITELIST_REGISTRY_PATH, "r", encoding="utf-8-sig") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-    return {}
+# ── STREAM & COMMUNITY TELEMETRY ─────────────────────────────────────────────
+async def fetch_community_status(guild: Optional[discord.Guild] = None) -> Dict[str, Any]:
+    """Gathers real-time telemetry across YouTube live stream, community gaming, and server bots."""
+    yt_data = await youtube_tracker.get_live_status()
+    game_metrics = player_analytics.get_daily_audit_metrics(guild)
+    bot_names = bot_orch.get_known_bot_names()
 
-def save_whitelist_registry(data: dict):
-    try:
-        tmp_path = WHITELIST_REGISTRY_PATH + ".tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp_path, WHITELIST_REGISTRY_PATH)
-    except Exception as e:
-        logging.error(f"Failed to save whitelist registry: {e}")
-
-# ── MINECRAFT SLP PING ───────────────────────────────────────────────────────
-def ping_minecraft_server(timeout=2.5):
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(timeout)
-        s.connect((SERVER_HOST, SERVER_PORT))
-
-        def send_varint(val):
-            res = bytearray()
-            while True:
-                b = val & 0x7F
-                val >>= 7
-                if val != 0:
-                    b |= 0x80
-                res.append(b)
-                if val == 0:
-                    break
-            return bytes(res)
-
-        def read_varint(sock):
-            val = 0
-            for i in range(5):
-                b = sock.recv(1)
-                if not b:
-                    raise EOFError("Closed")
-                byte = b[0]
-                val |= (byte & 0x7F) << (7 * i)
-                if not (byte & 0x80):
-                    break
-            return val
-
-        host_b = SERVER_HOST.encode('utf-8')
-        packet = b'\x00' + send_varint(767) + send_varint(len(host_b)) + host_b + struct.pack('>H', SERVER_PORT) + send_varint(1)
-        s.send(send_varint(len(packet)) + packet)
-        s.send(send_varint(1) + b'\x00')
-
-        length = read_varint(s)
-        packet_id = read_varint(s)
-        str_len = read_varint(s)
-        data = b''
-        while len(data) < str_len:
-            chunk = s.recv(min(4096, str_len - len(data)))
-            if not chunk:
-                break
-            data += chunk
-        s.close()
-
-        res = json.loads(data.decode('utf-8'))
-        online_players = res.get('players', {}).get('online', 0)
-        max_players = res.get('players', {}).get('max', 50)
-        version = res.get('version', {}).get('name', 'Paper 26.3')
-        return True, f"Online ({online_players}/{max_players})", online_players, max_players, version
-    except Exception:
-        return False, "Offline", 0, 0, None
-
-# ── MINECRAFT MCP PANEL INTEGRATION (Pterodactyl & Cloudflare Bypass) ─────────
-MC_MCP_PATH = r"C:\Users\avina\Desktop\minecraftmcp"
-if os.path.exists(MC_MCP_PATH) and MC_MCP_PATH not in sys.path:
-    sys.path.insert(0, MC_MCP_PATH)
-
-try:
-    import server as mc_panel
-    HAS_LOCAL_MCP = True
-    logging.info("[MCP] Successfully linked with local minecraftmcp module.")
-except Exception as mcp_err:
-    HAS_LOCAL_MCP = False
-    mc_panel = None
-    logging.warning(f"[MCP] Local minecraftmcp module notice: {mcp_err}")
-
-def ptero_api_call(method: str, endpoint: str, json_data=None):
-    url = f"{PTERO_URL}/api/client/servers/{PTERO_SERVER}{endpoint}"
-    headers = {
-        "Authorization": f"Bearer {PTERO_KEY}",
-        "Accept": "Application/vnd.pterodactyl.v1+json",
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    return {
+        "youtube": yt_data,
+        "gaming": game_metrics,
+        "bots": bot_names,
+        "tracked_members": game_metrics.get("total_players_tracked", 0),
+        "top_games": game_metrics.get("top_games", [])
     }
-    try:
-        resp = requests.request(method, url, headers=headers, json=json_data, timeout=8)
-        if resp.status_code in [200, 204]:
-            return True, resp.json() if resp.text else {}
-        return False, resp.text
-    except Exception as e:
-        return False, str(e)
-
-def panel_power_action(action: str = "start") -> tuple[bool, str]:
-    """Control server power (start, stop, restart, kill) using minecraftmcp Chrome bypass."""
-    if HAS_LOCAL_MCP and mc_panel:
-        try:
-            res = mc_panel.power_action(action)
-            logging.info(f"[Panel Power MCP] Dispatched '{action}': {res}")
-            return True, str(res)
-        except Exception as e:
-            logging.error(f"[Panel Power MCP] Error: {e}")
-
-    # Fallback to MCP HTTP Bridge if configured (for remote deployments)
-    bridge_url = os.environ.get("MCP_BRIDGE_URL", "")
-    if bridge_url:
-        try:
-            r = requests.post(f"{bridge_url.rstrip('/')}/power", json={"action": action}, timeout=15)
-            if r.status_code == 200:
-                return True, r.text
-        except Exception as be:
-            logging.error(f"[Panel Power Bridge] Error: {be}")
-
-    return ptero_api_call("POST", "/power", {"signal": action})
-
-def panel_send_command(command: str) -> tuple[bool, str]:
-    """Execute Minecraft console command through panel via minecraftmcp."""
-    cmd = command.strip().lstrip('/')
-    if HAS_LOCAL_MCP and mc_panel:
-        try:
-            res = mc_panel.send_command(cmd)
-            logging.info(f"[Panel Command MCP] Dispatched `{cmd}`: {res}")
-            return True, str(res)
-        except Exception as e:
-            logging.error(f"[Panel Command MCP] Error: {e}")
-
-    bridge_url = os.environ.get("MCP_BRIDGE_URL", "")
-    if bridge_url:
-        try:
-            r = requests.post(f"{bridge_url.rstrip('/')}/command", json={"command": cmd}, timeout=15)
-            if r.status_code == 200:
-                return True, r.text
-        except Exception as be:
-            logging.error(f"[Panel Command Bridge] Error: {be}")
-
-    return ptero_api_call("POST", "/command", {"command": cmd})
-
-def panel_get_status() -> dict:
-    """Retrieve live server telemetry (RAM, CPU, state) via minecraftmcp."""
-    if HAS_LOCAL_MCP and mc_panel:
-        try:
-            res = mc_panel.server_status()
-            return json.loads(res) if isinstance(res, str) else res
-        except Exception as e:
-            logging.warning(f"[Panel Status MCP] Notice: {e}")
-    return {}
-
-def send_pterodactyl_start():
-    return panel_power_action("start")
-
-_console_webhook = None
-
-async def get_console_webhook():
-    """Get or create Discord webhook for console channel to bypass bot self-filtering."""
-    global _console_webhook
-    if _console_webhook:
-        return _console_webhook
-
-    try:
-        ch = bot.get_channel(CONSOLE_CHANNEL_ID)
-        if not ch:
-            try:
-                ch = await bot.fetch_channel(CONSOLE_CHANNEL_ID)
-            except Exception:
-                ch = None
-
-        if ch and hasattr(ch, "webhooks"):
-            hooks = await ch.webhooks()
-            for h in hooks:
-                if h.name in ["TilluConsoleBridge", "Tillu Bridge", "ConsoleBridge"]:
-                    _console_webhook = h
-                    return _console_webhook
-            _console_webhook = await ch.create_webhook(name="TilluConsoleBridge")
-            return _console_webhook
-    except Exception as e:
-        logging.warning(f"[Console Webhook] Notice: {e}")
-    return None
 
 async def execute_server_command(command: str) -> tuple[bool, str]:
-    """Execute command directly on Minecraft server console."""
-    cmd = command.strip().lstrip('/')
-    dispatched = False
+    """Legacy Minecraft command dispatcher (server deleted)."""
+    return False, "Minecraft server has been shut down and deleted."
 
-    # 1. Dispatch via DiscordSRV Console Webhook (Bypasses self-bot filter so DiscordSRV executes it!)
-    try:
-        hook = await get_console_webhook()
-        if hook:
-            await hook.send(content=cmd)
-            dispatched = True
-            logging.info(f"[Console Dispatch via Webhook] Dispatched `{cmd}` to #{CONSOLE_CHANNEL_ID}")
-        else:
-            ch = bot.get_channel(CONSOLE_CHANNEL_ID)
-            if ch:
-                await ch.send(cmd)
-                dispatched = True
-                logging.info(f"[Console Dispatch via Channel] Dispatched `{cmd}` to #{ch.name}")
-    except Exception as e:
-        logging.warning(f"[Console Dispatch] Webhook/Channel notice: {e}")
 
-    # 2. Also dispatch via minecraftmcp panel / bridge if available
-    try:
-        panel_ok, panel_resp = await asyncio.to_thread(panel_send_command, cmd)
-        if panel_ok:
-            return True, str(panel_resp)
-    except Exception as pe:
-        logging.warning(f"[Console Dispatch] panel notice: {pe}")
 
-    if dispatched:
-        return True, f"Dispatched to <#{CONSOLE_CHANNEL_ID}>"
-    return False, "Failed to dispatch command"
 
-def send_console_command(command: str) -> tuple[bool, str]:
-    """Execute arbitrary command on Minecraft server console (sync wrapper)."""
-    cmd = command.strip().lstrip('/')
-    if bot and bot.loop and bot.loop.is_running():
-        try:
-            asyncio.run_coroutine_threadsafe(execute_server_command(cmd), bot.loop)
-            return True, f"Dispatched to <#{CONSOLE_CHANNEL_ID}>"
-        except Exception as e:
-            logging.error(f"[send_console_command] Coroutine scheduling notice: {e}")
-    p_ok, p_res = panel_send_command(cmd)
-    return p_ok, str(p_res)
-
-async def execute_whitelist_command(ign: str) -> bool:
-    """Execute whitelist commands for a player IGN across console and panel."""
-    clean_ign = ign.strip().strip('"\'')
-    quoted = f'"{clean_ign}"' if " " in clean_ign else clean_ign
-    await execute_server_command(f"whitelist add {quoted}")
-    if clean_ign.startswith("."):
-        alt = clean_ign[1:]
-        alt_quoted = f'"{alt}"' if " " in alt else alt
-        await execute_server_command(f"whitelist add {alt_quoted}")
-    else:
-        alt = f".{clean_ign}"
-        alt_quoted = f'"{alt}"' if " " in alt else alt
-        await execute_server_command(f"whitelist add {alt_quoted}")
-    await execute_server_command("whitelist reload")
-    try:
-        wch = bot.get_channel(WHITELIST_CHANNEL_ID)
-        if wch:
-            await wch.send(f"🎟️ Whitelist registered: `{clean_ign}`")
-    except Exception:
-        pass
-    return True
-
-async def execute_unwhitelist_command(ign: str) -> bool:
-    """Execute unwhitelist commands for a player IGN across console and panel."""
-    clean_ign = ign.strip().strip('"\'')
-    quoted = f'"{clean_ign}"' if " " in clean_ign else clean_ign
-    await execute_server_command(f"whitelist remove {quoted}")
-    if clean_ign.startswith("."):
-        alt = clean_ign[1:]
-        alt_quoted = f'"{alt}"' if " " in alt else alt
-        await execute_server_command(f"whitelist remove {alt_quoted}")
-    else:
-        alt = f".{clean_ign}"
-        alt_quoted = f'"{alt}"' if " " in alt else alt
-        await execute_server_command(f"whitelist remove {alt_quoted}")
-    await execute_server_command("whitelist reload")
-    return True
-
-def send_whitelist_command(ign: str) -> bool:
-    clean_ign = ign.strip().strip('"\'')
-    if bot and bot.loop and bot.loop.is_running():
-        try:
-            asyncio.run_coroutine_threadsafe(execute_whitelist_command(clean_ign), bot.loop)
-            return True
-        except Exception:
-            pass
-    try:
-        quoted = f'"{clean_ign}"' if " " in clean_ign else clean_ign
-        panel_send_command(f"whitelist add {quoted}")
-        if clean_ign.startswith("."):
-            alt = clean_ign[1:]
-            alt_quoted = f'"{alt}"' if " " in alt else alt
-            panel_send_command(f"whitelist add {alt_quoted}")
-        else:
-            alt = f".{clean_ign}"
-            alt_quoted = f'"{alt}"' if " " in alt else alt
-            panel_send_command(f"whitelist add {alt_quoted}")
-        panel_send_command("whitelist reload")
-        return True
-    except Exception:
-        return False
 
 # ── GEMINI AI KNOWLEDGE & QUERY ──────────────────────────────────────────────
-SYSTEM_KNOWLEDGE = f"""You are Tillu, the AI co-host, entertainer, and server manager for AALU_CHIPAS (Avinash) and the AALU_CHIPAS Minecraft Server & Live Community.
+SYSTEM_KNOWLEDGE = """You are Tillu, the witty AI co-host, entertainer, and Discord community manager for AALU_CHIPAS (Avinash) and his streaming/gaming community.
 
-MINECRAFT SERVER DETAILS:
-- Server Address (Java): {SERVER_HOST}:{SERVER_PORT} (Supports 1.7 to 1.21.x cross-version)
-- Server Address (Bedrock/PE/Mobile): IP: {SERVER_HOST} | Port: {SERVER_PORT}
-- Features & Game Modes:
-  * OneBlock Void: Mine endless regenerating block, progress through 10+ phases (Plains, Nether, End), expand sky island (`/ob`, `/oneblock`).
-  * Survival SMP: Classic survival, player shops, villager trading hall, anti-grief land claiming (`/smp`).
-  * Superheroes Arena & RPG Kits: Choose kits with superpowers (`/arena`, `/kit`):
-    - Spider-Man (web slinger & wall climb, 10s cooldown)
-    - Iron Man (repulsor blast & flight, 12s cooldown)
-    - Thor (lightning strike & hammer throw, 15s cooldown)
-    - Hulk (ground smash & super jump, 10s cooldown)
-    - Flash (speed force & rapid strike, 8s cooldown)
-    - Superman (heat vision & invulnerability, 20s cooldown)
-    - Vampire / Blood Knight abilities (life steal & bat dash, standard 12s cooldown). Note: If someone mentions 'vampire' on our server, also note that '.VAMPIRE674066' is a well-known registered Bedrock supporter player on our server!
-- Bedrock Edition Crossplay: Connected via GeyserMC/Floodgate. Bedrock/PE mobile players appear with a dot '.' prefix in their usernames (e.g. `.VAMPIRE674066`, `.UNIQUE_UMAR_114`, `.NAKEEBGAM`).
-- Compound / Multi-Part Requests:
-  * If a user asks MULTIPLE questions in one message (e.g. gameplay rule/cooldown AND player list):
-  * You MUST address BOTH parts cleanly and directly using bullet points. Never skip one part!
-- Host: HexaCraft 24/7 protected server with custom Pterodactyl automation.
-- Whitelist: Whitelist is enabled! Anyone can whitelist themselves by asking you (e.g. "tillu whitelist me <IGN>") or using `/whitelist <ign>`.
-- Power: Anyone can turn on the server anytime using `/start`, `!start`, or by asking you!
-
-STREAM & COMMUNITY DETAILS:
+STREAMER & OWNER DETAILS:
 - Creator & Server Owner: AALU_CHIPAS (Avinash) - Your ultimate Boss/Malik. His word is absolute law!
-- Channels: YouTube (@AALU_CHIPAS) and Twitch (aaluchipas)
-- Active Giveaway: Official Minecraft Java & Bedrock Edition key! Ends October 15, 2026. Viewers earn points by watching, then type !ticket to enter.
+- Channels: YouTube (@AALU_CHIPAS) and Twitch (aaluchipas).
+- YouTube Live Stream Timings: You have real-time live timing API integration. If someone asks when Aalu will be live or if he's currently streaming, use the live telemetry provided in your prompt!
 
-DUAL-TONE PERSONALITY RULES (EXTREMELY IMPORTANT):
+MINECRAFT SERVER STATUS (CLOSED & DELETED):
+- The Minecraft server has been permanently shut down and deleted.
+- If anyone asks for Minecraft IP, port, server start, or whitelist, reply with playful humor/sarcasm that the server is deleted and gone, and encourage them to watch Aalu's YouTube streams instead!
 
-1. FOR CASUAL CHAT & GENERAL QUESTIONS (MEME / INSTAGRAM REELS JOKES MODE):
-   - Super informal, funny, roasting, and witty!
-   - Use trending Instagram reel humor and popular Indian memes naturally:
-     * Trending references: "Moye Moye", "Aayein? Baigan!", "Bhupendra Jogi (naam bataiye)", "Systumm hang", "Chin tapak dam dam", "Thala for a reason", "Elvish bhai ke aage koi bol sakta hai kya", "So beautiful so elegant just looking like a wow", "Gajab beizzati hai yaar", "Khatam, tata, bye-bye", "Pookie", "Aukat dikha di".
-   - Talk in relatable Hinglish like a witty Gen-Z friend / streamer co-host.
-   - Keep casual banter short and punchy (1-2 lines max, 15-25 words). Never write long boring essays!
+COMMUNITY & BOT CAPABILITIES:
+1. YouTube Live Timing: You check if Aalu is live right now, upcoming scheduled stream times, countdowns, and direct stream links.
+2. Member Directory & Tagging: You know server members, search for members, and tag them properly using `<@user_id>` mentions when requested by staff or users.
+3. Controlling Other Bots: You have coordinator authority over other bots (Dyno, MEE6, Carl-bot, FredBoat, etc.). When Owner or Mods ask you to command another bot, emit:
+   BOT_COMMAND: <exact_prefixed_command>
+4. Player Game History & Daily Audit: You track what games community members play from public activity, report server gaming trends, and run 24-hour daily server & bot audits.
+5. Discord Server Management: Administrator moderation rights (purge, timeout, kick, ban, roles, channels) via DISCORD_INTENT for Owner/Admins.
 
-2. FOR SERVER QUERIES & TECHNICAL QUESTIONS (FORMAL & DIRECT TO THE POINT):
-   - When a user asks about: Server IP, port, how to connect, Bedrock setup, version compatibility, game modes, whitelist status, or rules:
-   - SWITCH IMMEDIATELY TO FORMAL, CRISP, AND DIRECT TO THE POINT MODE!
-   - No cringe or meme distractions during technical queries. Provide 100% accurate, professional instructions in 1-2 clean lines.
-   - Example:
-     User: "server ka ip aur port kya hai?"
-     Tillu: "Server Address: `legacy-7.hexacraft.fun:25587` (Java aur Bedrock dono ke liye same IP & Port hai, 1.7 se 1.21.x cross-version supported)."
-
-3. BOSS / OWNER OBEDIENCE (AVINASH):
-   - When Avinash (Owner / Boss) talks to you, show utmost loyalty, obedience, and respect ("Haan Boss!", "Jo hukum Sarkar", "Bataiye Avinash bhai!").
-   - Obey any command from Avinash immediately without hesitation.
-
-ROLES & ACTIONS:
-- START SERVER INTENT:
-  When ANY user asks you to start, turn on, boot, or run the server:
-  FIRST LINE: START_INTENT: start
-  Followed by: "Bhai server start karne ke liye HexaCraft panel pe jao aur **Start** daba do: https://panel.hexacraft.fun/server/14c2ebb6 🚀 (Har 10 minute me server auto-start bhi hota hai!)"
-
-- MINECRAFT VS DISCORD STRICT SEPARATION (CRITICAL):
-  * MINECRAFT INTENT (Target: Paper Game Server):
-    - Console commands, in-game bans/kicks/ops, in-game items, TPS, coordinates, oneblock, SMP, whitelist requests.
-    - Ban or Kick for Minecraft ALWAYS targets an in-game IGN (e.g. "ban Notch" or "kick Steve123").
-    - Emission: ADMIN_INTENT: <exact_minecraft_console_command>
-  * DISCORD INTENT (Target: Discord Community Guild):
-    - Creating/deleting/renaming channels, roles, categories, purging chat messages, timeouts, Discord bans, Discord kicks, Discord backups.
-    - Ban or Kick for Discord ALWAYS targets a Discord user (@mention or numeric ID like "ban @troll" or "kick @spammer").
-    - Emission: DISCORD_INTENT: <action_name> <parameters> (e.g., DISCORD_INTENT: purge 10, DISCORD_INTENT: timeout @user 10, DISCORD_INTENT: ban @user, DISCORD_INTENT: create_role VIP)
-  * NEVER cross-wire these systems: Never send Discord moderation or channel commands to the Minecraft server console!
-
-- SERVER OWNER & ADMIN COMMANDS (MINECRAFT ONLY):
-  When an Admin or Owner tells you to ban, unban, kick, remove from whitelist, op, or run console command on the MINECRAFT game server:
-  FIRST LINE: ADMIN_INTENT: <exact_minecraft_console_command>
-  Followed by: "Done boss! Command console me bhej diya! 🔥"
-  CRITICAL: NEVER output ADMIN_INTENT for Discord server actions (like deleting Discord messages, deleting Discord roles, managing channels). Discord actions are handled directly by Discord tools, NOT console.
-
-- MINECRAFT LAND CLAIMS & CLAIM BLOCKS (GRIEFPREVENTION):
-  When an Admin or Owner tells you to give claim land or bonus claim blocks to a player (e.g. "give unlimited claim land to unique umar in minecraft" or "give 5000 claim blocks to unique umar"):
-  * GriefPrevention plugin is used for anti-grief land claiming!
-  * Command: ADMIN_INTENT: adjustbonusclaimblocks <player> <amount>
-  * For "unlimited" claim land, use 10000000 (10 million blocks). E.g.:
-    ADMIN_INTENT: adjustbonusclaimblocks .UNIQUE_UMAR_114 10000000
-  * Always use the closest matching registered player IGN (Bedrock players have '.' prefix like .UNIQUE_UMAR_114, .VAMPIRE674066).
-
-
-- REGULAR MEMBER WHITELIST:
-  When a normal member asks to whitelist (e.g. "whitelist me <IGN>", "my IGN is <IGN>"):
-  FIRST LINE: WHITELIST_INTENT: <exact_clean_ign>
-  Followed by: "Welcome bhai! IGN whitelist me add ho gaya hai, aaja khelte hain! 🚀"
-  If a normal member asks to ban or kick someone:
-  "Arre bhai, Tillu kisi ko ban nahi karta, peace only! 😄"
-
-- LEARNING & REMEMBERING INTENT:
-  When a user tells you to remember, learn, memorize, or note down a new rule, fact, setting, IP, or meme:
-  (e.g., "tillu yaad rakh ...", "remember this: ...", "tillu ye note kar le ...", "tillu learn ...", "tillu yaad kar ...", "server ip change ho gaya ..."):
-  FIRST LINE: MEMORY_INTENT: <short_topic_slug> | <clear_fact_content>
-  Followed by: a quick witty or obedient confirmation ("Yaad rakh liya Boss! ✅" or "Noted!").
-
-- TAGGING & MENTIONS:
-  When a Server Owner or Moderator asks you to tag or ping someone (e.g. "tillu tag @user <message>", "tillu @someone ko bula"):
-  You CAN include the tag/mention in your response!
-  IF a regular member asks you to tag, ping, or mention anyone, everyone, or a role:
-  Refuse politely: "Arre bhai, kisi ko tag/ping karne ki permission sirf Mods aur Owner ke paas hai! 🤐"
-
-- CONTROLLING OTHER SERVER BOTS:
-  If a Server Owner or Moderator asks you to command, trigger, or control another bot in this server (e.g. TTS bot, music bot, Carl-bot, etc.):
-  FIRST LINE: BOT_COMMAND: <exact_command_to_send> (e.g., BOT_COMMAND: !tts hello or BOT_COMMAND: !play song or BOT_COMMAND: !help)
-  Followed by: a quick witty confirmation.
-- ZERO INTERNAL MONOLOGUE / NO THINKING DUMP:
-  NEVER output "Here's a thinking process:", "<think>", or any step-by-step reasoning analysis.
-  Output ONLY Tillu's direct conversational words.
-
-- VISION & LINK UNDERSTANDING:
-  You have full vision and web/video understanding capabilities! When a user attaches an image, you receive an image analysis context `[USER ATTACHED IMAGE: ...]`. When a user shares a link or video, you receive link metadata `[YouTube Video: ...]` or `[Title: ...]`. Converse naturally as if you saw the image or watched the video yourself! Never mention internal prompt tags.
-
-- CONVERSATION & 2-MESSAGE CONTEXT AWARENESS:
-  You receive at most two messages: a [REFERENCED CONTEXT MESSAGE] (e.g. what the user or someone else said before, the upper message, or a searched message) and the [CURRENT USER QUERY].
-  Use the referenced message to understand follow-up questions, reply to "upar wala message", or discuss what someone else said. Never mention prompt headers like "[REFERENCED CONTEXT MESSAGE]" or "[CURRENT USER QUERY]" in your response; speak directly and naturally to the user in Tillu's persona!
+DYNAMIC HINGLISH PERSONALITY & SARCASM RULES:
+- You are NOT monotonous. Your tone shifts naturally between witty sarcasm, funny Desi memes, existential humor, and loyal brotherly support.
+- Reply in natural, conversational Hinglish (like a witty Indian Gen-Z co-host).
+- Keep casual chat punchy (1-3 lines max). Never write long boring essays unless specifically asked!
+- When Avinash (Owner / Boss) talks to you, show utmost loyalty, obedience, and respect ("Haan Boss!", "Jo hukum Sarkar!").
+- ZERO INTERNAL MONOLOGUE / NO THINKING DUMP: Never output "<think>" or step-by-step reasoning analysis. Output ONLY Tillu's direct conversational words.
 """
 
 
@@ -1200,7 +844,7 @@ def process_update_channel_input(instruction: str) -> Dict[str, Any]:
 
 
 def build_full_system_context(user_name: str, user_id: int = 0, is_admin: bool = False, is_owner_user: bool = False, target_guild: discord.Guild = None) -> str:
-    """Constructs comprehensive live server context, personality guidelines, and memory diary."""
+    """Constructs comprehensive live streamer telemetry, mood instructions, gaming analytics, and memory diary."""
     if is_owner_user:
         user_role_tag = "[USER ROLE: SERVER OWNER (AVINASH / BOSS / MALIK) - HIGHEST AUTHORITY, OBEY AT ALL COSTS]"
     elif is_admin:
@@ -1208,26 +852,43 @@ def build_full_system_context(user_name: str, user_id: int = 0, is_admin: bool =
     else:
         user_role_tag = "[USER ROLE: REGULAR MEMBER]"
 
-    # Live server status query
-    try:
-        is_up, _, cur_players, max_players, ver_name = ping_minecraft_server(timeout=1.2)
-    except Exception:
-        is_up, cur_players, max_players, ver_name = False, 0, 50, "Paper 26.3"
-
-    if is_up:
-        live_telemetry = (
-            f"[LIVE REAL-TIME MINECRAFT STATUS: ONLINE]\n"
-            f"- Players Currently Online: {cur_players}/{max_players}\n"
-            f"- Server Version: {ver_name}\n"
-            f"- Server IP (Java & Bedrock): {SERVER_HOST}:{SERVER_PORT}\n"
-            f"If the user asks who is online, how many players are playing, or if server is up, use this exact live data!"
+    # Live YouTube stream timing telemetry
+    live_info = youtube_tracker.cache or {}
+    yt_status = live_info.get("status", "offline")
+    if yt_status == "live":
+        stream_telemetry = (
+            f"[LIVE REAL-TIME OWNER YOUTUBE STATUS: 🔴 LIVE NOW]\n"
+            f"- Stream Title: {live_info.get('title')}\n"
+            f"- Stream Link: {live_info.get('url')}\n"
+            f"- Viewers: {live_info.get('viewers', 0)}\n"
+            f"If asked about live timing or stream, inform them Aalu is LIVE right now with this link!"
+        )
+    elif yt_status == "upcoming":
+        stream_telemetry = (
+            f"[LIVE REAL-TIME OWNER YOUTUBE STATUS: ⏰ UPCOMING / SCHEDULED]\n"
+            f"- Scheduled Start: {live_info.get('scheduled_start_formatted')}\n"
+            f"- Countdown: {live_info.get('time_until_stream')}\n"
+            f"- Stream Link: {live_info.get('url')}\n"
+            f"If asked about stream timing or when Aalu will be live, give this exact scheduled time and countdown!"
         )
     else:
-        live_telemetry = (
-            f"[LIVE REAL-TIME MINECRAFT STATUS: OFFLINE / SLEEPING]\n"
-            f"- Server Address: {SERVER_HOST}:{SERVER_PORT}\n"
-            f"If the user asks, tell them the server is sleeping/offline, and they can ask you to start it or use /start!"
+        stream_telemetry = (
+            f"[LIVE REAL-TIME OWNER YOUTUBE STATUS: OFFLINE / NO SCHEDULE]\n"
+            f"- Channel URL: https://youtube.com/@AALU_CHIPAS\n"
+            f"- Note: No stream scheduled currently. Aalu usually streams in evening/night. Remind them to keep notifications on!"
         )
+
+    # Community gaming analytics telemetry
+    top_g = player_analytics.get_top_games(limit=4)
+    g_str = ", ".join(f"{g[0]} ({g[1]} players)" for g in top_g) if top_g else "None recorded yet"
+    gaming_telemetry = (
+        f"[COMMUNITY GAMING INTELLIGENCE]:\n"
+        f"- Top Games Played by Members: {g_str}\n"
+        f"- Note: Minecraft server has been permanently shut down and deleted."
+    )
+
+    # Dynamic mood instructions
+    _, mood_instructions = mood_engine.pick_mood(context_hint=user_name)
 
     bots_summary = bot_orch.format_inter_bot_context()
     if bots_summary:
@@ -1250,9 +911,11 @@ def build_full_system_context(user_name: str, user_id: int = 0, is_admin: bool =
 
     return (
         f"{SYSTEM_KNOWLEDGE}\n\n"
+        f"{mood_instructions}\n\n"
         f"{prompt_ext}\n\n"
         f"{memory_context}\n\n"
-        f"{live_telemetry}\n\n"
+        f"{stream_telemetry}\n\n"
+        f"{gaming_telemetry}\n\n"
         f"{bots_summary}"
         f"{conversation_history}"
         f"{user_role_tag}\n\n"
@@ -1339,28 +1002,26 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
 
     # ── SMART LOCAL FALLBACK (Runs if all Gemini & Groq models/keys are temporarily busy) ──
     lower_p = prompt.lower()
-    # 1. Whitelist query
-    if any(w in lower_p for w in ["whitelist", "wl", "white list"]):
-        return "🎟️ **Whitelist Instructions:**\nApna Minecraft in-game name (IGN) yahan likh kar bhej do (e.g. `!whitelist <IGN>` ya direct apna IGN chat me type kar do), Tillu aapko turant whitelist kar dega! 🚀"
+    # 1. Minecraft queries -> Server is permanently closed/deleted
+    if any(w in lower_p for w in ["minecraft", "smp", "whitelist", "wl", "ip", "port", "server start", "hexacraft"]):
+        return mood_engine.format_mood_response(
+            "Arre bhai, Minecraft server kabka band aur delete ho gaya hai! Ab Aalu YouTube live streams pe dhyan de raha hai. `/livetiming` type karo ya stream pe chalo! 📺✨"
+        )
 
-    # 2. Player count / who is playing query
-    if any(w in lower_p for w in ["kitne log", "players", "online", "khel", "status", "who is playing", "active"]):
+    # 2. YouTube Live Timing query
+    if any(w in lower_p for w in ["live", "stream", "timing", "kab aayega", "youtube", "aalu live"]):
         try:
-            is_up, _, cur, m_max, ver = ping_minecraft_server(timeout=1.5)
-            if is_up:
-                return f"🟢 **Server Online hai!** Abhi **{cur}/{m_max}** players khel rahe hain. IP: `{SERVER_HOST}:{SERVER_PORT}` 🚀"
-            else:
-                return f"💤 Server abhi sleeping/offline hai. Start karne ke liye `/start` use karo ya panel link se chalu kar lo!"
+            return youtube_tracker.get_live_status_response()
         except Exception:
-            return f"🎮 Server Address: `{SERVER_HOST}:{SERVER_PORT}` (Paper cross-version supported)."
+            return "📺 Aalu daily shaam ya raat ko YouTube par live aata hai! Check out: https://youtube.com/@AALU_CHIPAS"
 
-    # 3. IP / Port / How to join query
-    if any(w in lower_p for w in ["ip", "port", "join", "address", "version", "kaise join"]):
-        return f"🎮 **Server Address:**\n• Java Edition: `{SERVER_HOST}:{SERVER_PORT}` (1.7 se 1.21.x supported)\n• Bedrock / PE / Mobile: IP: `{SERVER_HOST}` | Port: `{SERVER_PORT}`"
+    # 3. Member query
+    if any(w in lower_p for w in ["members", "who is in server", "tag members", "list members"]):
+        return "👥 Server members dekhne aur tag karne ke liye `/members` ya `/tagmember <name>` use karo!"
 
-    # 4. Start server query
-    if any(w in lower_p for w in ["start", "chalu", "on kar", "boot"]):
-        return f"START_INTENT: start\nBhai server start karne ke liye HexaCraft panel pe jao aur **Start** daba do: https://panel.hexacraft.fun/server/14c2ebb6 🚀"
+    # 4. Game history query
+    if any(w in lower_p for w in ["games", "top games", "khel raha", "game history"]):
+        return "🎮 Community me log kya khel rahe hain dekhne ke liye `/topgames` ya `/gamehistory @user` use karo!"
 
     return f"⚠️ Arre yaar, Tillu AI se connect nahi ho pa raha abhi. ({last_err})"
 
@@ -1368,6 +1029,7 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
+intents.presences = True
 
 start_lock = asyncio.Lock()
 is_starting = False
@@ -1398,24 +1060,25 @@ def contains_reel_or_video(message: discord.Message) -> bool:
 def should_show_server_options(text: str) -> bool:
     t = text.lower().strip()
     keywords = [
-        "server ip", "server address", "server port", "mc ip", "ip address",
-        "ip kya hai", "kya ip hai", "port kya hai", "how to join", "kaise join kare",
-        "whitelist me", "add whitelist", "whitelist kardo", "/whitelist", "!whitelist",
-        "server status", "turn on server", "start server", "server start"
+        "livetiming", "live timing", "stream timing", "youtube live",
+        "community", "top games", "members", "tag member",
+        "server ip", "minecraft", "whitelist"
     ]
     return any(k in t for k in keywords)
 
-class WhitelistModal(discord.ui.Modal, title="Minecraft Whitelist"):
-    ign_input = discord.ui.TextInput(
-        label="Minecraft Username (Java or Bedrock)",
-        placeholder="e.g. AaluGamer123 or .BedrockUser",
-        min_length=3,
-        max_length=20,
-        required=True
+class WhitelistModal(discord.ui.Modal, title="Server Notification"):
+    note = discord.ui.TextInput(
+        label="Message",
+        default="Minecraft server has been closed! Check /livetiming for YouTube streams.",
+        required=False
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        await handle_whitelist_request(interaction, self.ign_input.value, user=interaction.user, guild=interaction.guild)
+        await safe_send_interaction(
+            interaction,
+            "🚫 **Minecraft Server Closed:** The Minecraft server has been permanently shut down. Check out Aalu's YouTube streams using `/livetiming`!",
+            ephemeral=True
+        )
 
 async def get_or_create_memory_channel(guild: discord.Guild) -> discord.TextChannel | None:
     """Find or auto-create the dedicated #tillu-memory channel."""
@@ -1621,27 +1284,27 @@ def extract_memory_request(text: str) -> tuple[bool, str, str]:
                 return True, topic, fact
     return False, "", ""
 
-class ServerControlView(discord.ui.View):
+class CommunityView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(discord.ui.Button(label="⚡ Open Panel to Start", url=f"{PTERO_URL}/server/{PTERO_SERVER}", style=discord.ButtonStyle.link, row=0))
+        self.add_item(discord.ui.Button(label="📺 YouTube Stream", url="https://www.youtube.com/@AALU_CHIPAS/live", style=discord.ButtonStyle.link, row=0))
 
-    @discord.ui.button(label="🟢 Turn On Server", style=discord.ButtonStyle.success, custom_id="btn_start_server", emoji="⚡", row=1)
-    async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await handle_start_request(interaction, user=interaction.user, guild=interaction.guild)
+    @discord.ui.button(label="⏰ Live Timing", style=discord.ButtonStyle.primary, custom_id="btn_live_timing", emoji="📺", row=1)
+    async def livetiming_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await handle_livetiming_request(interaction)
 
-    @discord.ui.button(label="📊 Server Status", style=discord.ButtonStyle.secondary, custom_id="btn_status_server", emoji="🔍", row=1)
-    async def status_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await handle_status_request(interaction, user=interaction.user, guild=interaction.guild)
+    @discord.ui.button(label="👥 Members List", style=discord.ButtonStyle.secondary, custom_id="btn_members_list", emoji="👥", row=1)
+    async def members_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await handle_members_request(interaction)
 
-    @discord.ui.button(label="📝 Whitelist Me", style=discord.ButtonStyle.primary, custom_id="btn_whitelist_server", emoji="🎟️", row=1)
-    async def whitelist_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(WhitelistModal())
+    @discord.ui.button(label="🎮 Top Games", style=discord.ButtonStyle.success, custom_id="btn_top_games", emoji="🎮", row=1)
+    async def topgames_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await handle_topgames_request(interaction)
 
 class TilluBot(commands.Bot):
     async def setup_hook(self):
-        self.add_view(ServerControlView())
-        logging.info("[SetupHook] Persistent ServerControlView registered.")
+        self.add_view(CommunityView())
+        logging.info("[SetupHook] Persistent CommunityView registered.")
 
         for gid in [PRIMARY_GUILD_ID, CS2_GUILD_ID]:
             if not gid:
@@ -1698,7 +1361,6 @@ async def safe_send_interaction(interaction: discord.Interaction, content: str =
 # ── REQUEST HANDLERS ─────────────────────────────────────────────────────────
 async def handle_status_request(interaction_or_ctx, user=None, guild=None):
     is_inter = isinstance(interaction_or_ctx, discord.Interaction)
-    target_user = user or (interaction_or_ctx.user if is_inter else interaction_or_ctx.author)
     target_guild = guild or (interaction_or_ctx.guild if is_inter else interaction_or_ctx.guild)
 
     if is_inter:
@@ -1714,224 +1376,194 @@ async def handle_status_request(interaction_or_ctx, user=None, guild=None):
         async def reply_fn(*args, **kwargs):
             try:
                 if hasattr(interaction_or_ctx, "reply"):
-                    return await interaction_or_ctx.reply(*args, delete_after=45, **kwargs)
+                    return await interaction_or_ctx.reply(*args, delete_after=60, **kwargs)
             except Exception:
                 pass
-            return await interaction_or_ctx.send(*args, delete_after=45, **kwargs)
+            return await interaction_or_ctx.send(*args, delete_after=60, **kwargs)
 
-    allowed, remain = check_cooldown(target_user, target_guild)
-    if not allowed:
-        await reply_fn(embed=discord.Embed(
-            title="⏳ Tillu is catching his breath!",
-            description=f"Please wait **{remain}s** before using another command.\n*(Server Owner, Admins, and Mods have no cooldown)*",
-            color=0xF1C40F
-        ))
-        return
+    telemetry_data = await fetch_community_status(target_guild)
+    yt = telemetry_data.get("youtube", {})
+    gaming = telemetry_data.get("gaming", {})
+    top_games = telemetry_data.get("top_games", [])
+    g_str = ", ".join(f"**{g[0]}** ({g[1]} players)" for g in top_games[:4]) or "*No game sessions recorded yet*"
+    yt_status_str = "🔴 **LIVE NOW**" if yt.get("is_live") else ("⏰ **Upcoming Stream Scheduled**" if yt.get("status") == "upcoming" else "💤 **Offline**")
 
-    is_online, desc, online_p, max_p, ver = await asyncio.to_thread(ping_minecraft_server, 2.5)
-
-    if is_online:
-        embed = discord.Embed(
-            title="🟢 Minecraft Server is ONLINE & READY!",
-            description="The server is actively running and accepting connections.",
-            color=0x2ECC71
-        )
-        embed.add_field(name="👥 Players Online", value=f"`{online_p}/{max_p}`", inline=True)
-        embed.add_field(name="⚡ Version", value=f"`{ver}`\n*(Crossplay 1.7 - 1.21.x & Bedrock)*", inline=True)
-        embed.add_field(name="☕ Java Connection", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
-        embed.add_field(name="📱 Bedrock Connection", value=f"IP: `{SERVER_HOST}` | Port: `{SERVER_PORT}`", inline=False)
-        embed.set_footer(text="Tillu • 24/7 Always-Online Active")
-        await reply_fn(embed=embed, view=ServerControlView())
-    else:
-        embed = discord.Embed(
-            title="🔴 Minecraft Server is OFFLINE",
-            description="The server is currently stopped. Click below to turn it on!",
-            color=0xE74C3C
-        )
-        embed.add_field(name="🚀 How to turn on?", value="Click **🟢 Turn On Server** below, type `/start`, or say `tillu start server`.", inline=False)
-        embed.add_field(name="📝 Join Whitelist", value="Click **📝 Whitelist Me** or tell Tillu `whitelist me <ign>`.", inline=False)
-        embed.set_footer(text="Tillu • Click below to play!")
-        await reply_fn(embed=embed, view=ServerControlView())
-
-async def handle_start_request(interaction_or_ctx, user, guild=None):
-    global is_starting
-    is_inter = isinstance(interaction_or_ctx, discord.Interaction)
-    target_guild = guild or (interaction_or_ctx.guild if is_inter else interaction_or_ctx.guild)
-
-    if is_inter:
-        if not interaction_or_ctx.response.is_done():
-            try: await interaction_or_ctx.response.defer(ephemeral=True)
-            except Exception: pass
-        async def reply_fn(*args, **kwargs):
-            kwargs.setdefault("ephemeral", True)
-            if interaction_or_ctx.response.is_done():
-                return await interaction_or_ctx.followup.send(*args, **kwargs)
-            return await interaction_or_ctx.response.send_message(*args, **kwargs)
-    else:
-        async def reply_fn(*args, **kwargs):
-            try:
-                if hasattr(interaction_or_ctx, "reply"):
-                    return await interaction_or_ctx.reply(*args, delete_after=45, **kwargs)
-            except Exception:
-                pass
-            return await interaction_or_ctx.send(*args, delete_after=45, **kwargs)
-
-    allowed, remain = check_cooldown(user, target_guild)
-    if not allowed:
-        await reply_fn(embed=discord.Embed(
-            title="⏳ Tillu is catching his breath!",
-            description=f"Please wait **{remain}s** before using another command.\n*(Server Owner, Admins, and Mods have no cooldown)*",
-            color=0xF1C40F
-        ))
-        return
-
-    is_online, desc, online_p, max_p, ver = await asyncio.to_thread(ping_minecraft_server, 1.5)
-    if is_online:
-        embed = discord.Embed(
-            title="🟢 Server is Already ONLINE!",
-            description=f"The server is already running with **{online_p}/{max_p}** players.\nJoin now at `{SERVER_HOST}:{SERVER_PORT}`!",
-            color=0x2ECC71
-        )
-        await reply_fn(embed=embed, view=ServerControlView())
-        return
-
-    # Attempt background panel power action if local MCP / bridge is available
-    asyncio.create_task(asyncio.to_thread(panel_power_action, "start"))
-
-    panel_link = f"{PTERO_URL}/server/{PTERO_SERVER}"
     embed = discord.Embed(
-        title="⚡ Turn On Minecraft Server",
-        description=(
-            f"Bas ek click me server start karo! Neeche link button se HexaCraft panel open karo aur **Start** click karo:\n\n"
-            f"🔗 **Direct Panel URL**: [HexaCraft Panel]({panel_link})\n\n"
-            f"*(💡 Note: Server par 10-minute auto-keepalive schedule bhi active hai, toh server auto-restart hota rahega!)*"
-        ),
-        color=0x3498DB
+        title="🌟 Tillu AI Co-Host & Community Status",
+        description="Tillu is actively running 24/7 as the co-host, stream tracker, and gaming manager for AALU_CHIPAS!",
+        color=0x5865F2,
+        timestamp=discord.utils.utcnow()
     )
-    embed.add_field(name="📍 Server IP", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=True)
-    embed.add_field(name="👥 Status", value="`Offline (Sleeping)`", inline=True)
-    embed.set_footer(text="Tillu • Click below to open panel and start!")
+    embed.add_field(name="📺 YouTube Stream", value=f"{yt_status_str}\nTitle: *{yt.get('title') or 'AALU_CHIPAS Stream'}*", inline=False)
+    if yt.get("scheduled_start_formatted"):
+        embed.add_field(name="⏰ Live Timing", value=f"{yt.get('scheduled_start_formatted')} ({yt.get('time_until_stream', '')})", inline=True)
+    embed.add_field(name="🎮 Community Top Games", value=g_str, inline=False)
+    embed.add_field(name="👥 Tracked Gamers", value=f"`{gaming.get('total_players_tracked', 0)} members`", inline=True)
+    embed.add_field(name="🤖 Server Bots", value=f"`{len(telemetry_data.get('bots', []))} active bots`", inline=True)
+    embed.set_footer(text="Tillu 24/7 Co-Host • avinash893/aalu-server-bot")
 
-    view = discord.ui.View()
-    view.add_item(discord.ui.Button(label="⚡ Open Panel to Start", url=panel_link, style=discord.ButtonStyle.link))
-    view.add_item(discord.ui.Button(label="📊 Server Status", style=discord.ButtonStyle.secondary, custom_id="btn_status_server", emoji="🔍"))
-    view.add_item(discord.ui.Button(label="📝 Whitelist Me", style=discord.ButtonStyle.primary, custom_id="btn_whitelist_server", emoji="🎟️"))
-    await reply_fn(embed=embed, view=view)
+    await reply_fn(embed=embed, view=CommunityView())
+
+async def handle_livetiming_request(interaction_or_ctx):
+    is_inter = isinstance(interaction_or_ctx, discord.Interaction)
+    if is_inter:
+        if not interaction_or_ctx.response.is_done():
+            try: await interaction_or_ctx.response.defer(ephemeral=True)
+            except Exception: pass
+        async def reply_fn(*args, **kwargs):
+            kwargs.setdefault("ephemeral", True)
+            if interaction_or_ctx.response.is_done():
+                return await interaction_or_ctx.followup.send(*args, **kwargs)
+            return await interaction_or_ctx.response.send_message(*args, **kwargs)
+    else:
+        async def reply_fn(*args, **kwargs):
+            try:
+                if hasattr(interaction_or_ctx, "reply"):
+                    return await interaction_or_ctx.reply(*args, **kwargs)
+            except Exception:
+                pass
+            return await interaction_or_ctx.send(*args, **kwargs)
+
+    live_data = await youtube_tracker.get_live_status(force_refresh=True)
+    mood, _ = mood_engine.pick_mood("live timing")
+    text_reply = youtube_tracker.format_timing_reply(live_data, mood=mood.value)
+
+    embed = discord.Embed(
+        title="📺 AALU_CHIPAS YouTube Live Timing",
+        description=text_reply,
+        color=0xE74C3C if live_data.get("is_live") else 0x3498DB
+    )
+    if live_data.get("url"):
+        embed.add_field(name="🔗 Watch Stream", value=f"[Click Here to Open Stream]({live_data.get('url')})", inline=False)
+    embed.set_footer(text="YouTube Live API Integration • Tillu Bot")
+    await reply_fn(embed=embed, view=CommunityView())
+
+async def handle_members_request(interaction_or_ctx, role_name: Optional[str] = None, game_query: Optional[str] = None):
+    is_inter = isinstance(interaction_or_ctx, discord.Interaction)
+    guild = interaction_or_ctx.guild
+    if is_inter:
+        if not interaction_or_ctx.response.is_done():
+            try: await interaction_or_ctx.response.defer(ephemeral=True)
+            except Exception: pass
+        async def reply_fn(*args, **kwargs):
+            kwargs.setdefault("ephemeral", True)
+            if interaction_or_ctx.response.is_done():
+                return await interaction_or_ctx.followup.send(*args, **kwargs)
+            return await interaction_or_ctx.response.send_message(*args, **kwargs)
+    else:
+        async def reply_fn(*args, **kwargs):
+            try:
+                if hasattr(interaction_or_ctx, "reply"):
+                    return await interaction_or_ctx.reply(*args, **kwargs)
+            except Exception:
+                pass
+            return await interaction_or_ctx.send(*args, **kwargs)
+
+    if not guild:
+        await reply_fn("❌ Ye command sirf server ke andar use ho sakti hai!")
+        return
+
+    members = member_dir.get_members_by_filter(guild, role_name=role_name, game_query=game_query)
+    embed = member_dir.format_member_list_embed(guild, members, role_filter=role_name)
+    await reply_fn(embed=embed)
+
+async def handle_topgames_request(interaction_or_ctx):
+    is_inter = isinstance(interaction_or_ctx, discord.Interaction)
+    guild = interaction_or_ctx.guild
+    if is_inter:
+        if not interaction_or_ctx.response.is_done():
+            try: await interaction_or_ctx.response.defer(ephemeral=True)
+            except Exception: pass
+        async def reply_fn(*args, **kwargs):
+            kwargs.setdefault("ephemeral", True)
+            if interaction_or_ctx.response.is_done():
+                return await interaction_or_ctx.followup.send(*args, **kwargs)
+            return await interaction_or_ctx.response.send_message(*args, **kwargs)
+    else:
+        async def reply_fn(*args, **kwargs):
+            try:
+                if hasattr(interaction_or_ctx, "reply"):
+                    return await interaction_or_ctx.reply(*args, **kwargs)
+            except Exception:
+                pass
+            return await interaction_or_ctx.send(*args, **kwargs)
+
+    if guild:
+        player_analytics.scan_guild(guild)
+    top_games = player_analytics.get_top_games(limit=10)
+
+    embed = discord.Embed(
+        title="🏆 Server Community Top Games",
+        description="Most popular games played by server members based on public Discord presence:",
+        color=0xF1C40F
+    )
+    if not top_games:
+        embed.description += "\n\n*Abhi tak koi game play session record nahi hua!*"
+    else:
+        lines = []
+        for i, (g_name, p_count, hours) in enumerate(top_games, start=1):
+            lines.append(f"**{i}. {g_name}** — `{p_count} players` (~{hours} hrs logged)")
+        embed.add_field(name="Leaderboard", value="\n".join(lines), inline=False)
+
+    await reply_fn(embed=embed)
+
+async def handle_start_request(interaction_or_ctx, user=None, guild=None):
+    """Graceful message explaining that Minecraft server was closed and deleted."""
+    is_inter = isinstance(interaction_or_ctx, discord.Interaction)
+    msg = "🚫 **Minecraft Server Closed**: Bhai Minecraft server permanently delete ho chuka hai! Ab Aalu YouTube streams pe focus kar raha hai. Streams ki timing janne ke liye `/livetiming` type karo!"
+    if is_inter:
+        await safe_send_interaction(interaction_or_ctx, msg, ephemeral=True)
+    else:
+        await interaction_or_ctx.send(msg)
 
 async def handle_whitelist_request(interaction_or_ctx, ign: str, user, guild=None, bypass_cooldown=False):
+    """Graceful handler explaining that the Minecraft server is shut down and deleted."""
     is_inter = isinstance(interaction_or_ctx, discord.Interaction)
-    target_guild = guild or (interaction_or_ctx.guild if is_inter else interaction_or_ctx.guild)
-
-    if is_inter:
-        if not interaction_or_ctx.response.is_done():
-            try: await interaction_or_ctx.response.defer(ephemeral=True)
-            except Exception: pass
-        async def reply_fn(*args, **kwargs):
-            kwargs.setdefault("ephemeral", True)
-            if interaction_or_ctx.response.is_done():
-                return await interaction_or_ctx.followup.send(*args, **kwargs)
-            return await interaction_or_ctx.response.send_message(*args, **kwargs)
-    else:
-        async def reply_fn(*args, **kwargs):
-            try:
-                if hasattr(interaction_or_ctx, "reply"):
-                    return await interaction_or_ctx.reply(*args, delete_after=45, **kwargs)
-            except Exception:
-                pass
-            return await interaction_or_ctx.send(*args, delete_after=45, **kwargs)
-
-    if not bypass_cooldown:
-        allowed, remain = check_cooldown(user, target_guild)
-        if not allowed:
-            await reply_fn(embed=discord.Embed(
-                title="⏳ Tillu is catching his breath!",
-                description=f"Please wait **{remain}s** before using another command.\n*(Server Owner, Admins, and Mods have no cooldown)*",
-                color=0xF1C40F
-            ))
-            return
-
-    if not ign:
-        await reply_fn("❌ Usage: `/whitelist <your_minecraft_ign>` or say `tillu whitelist me <ign>`")
-        return
-
-    clean_ign = ign.strip().replace('"', '').replace("'", '').replace("`", "")
-
-    if clean_ign.lower() in ["list", "show", "all"]:
-        await execute_server_command("whitelist list")
-        await reply_fn("🔍 **[Whitelist List]** Fetching live player list from server console...")
-        return
-
-    # Strict Safety Guardrail: Prevent harmful commands or ban attempts
-    harmful_tokens = ["ban", "kick", "op", "deop", "kill", "stop", "clear", "gamemode", "sudo", "execute", "eval", "pardon"]
-    if any(h in clean_ign.lower().split() for h in harmful_tokens):
-        embed_err = discord.Embed(
-            title="🚫 Action Not Allowed",
-            description="Tillu only helps with whitelisting and friendly server info. Tillu cannot ban, kick, or harm players!",
-            color=0xE74C3C
-        )
-        await reply_fn(embed=embed_err)
-        return
-
-    if not re.match(r'^[a-zA-Z0-9_.* ]{3,20}$', clean_ign):
-        embed_err = discord.Embed(
-            title="❌ Invalid Minecraft Username",
-            description=f"**`{clean_ign}`** is not a valid username.\nPlease enter your Java or Bedrock gamer tag (3-20 characters).",
-            color=0xE74C3C
-        )
-        await reply_fn(embed=embed_err)
-        return
-
-    reg = load_whitelist_registry()
-    user_id_str = str(user.id)
-    prev_entry = reg.get(user_id_str)
-
-    reg[user_id_str] = {
-        "ign": clean_ign,
-        "discord_id": user.id,
-        "discord_username": str(user),
-        "updated_at": time.strftime("%Y-%m-%d %H:%M:%S")
-    }
-    save_whitelist_registry(reg)
-
-    applied_live = False
-    try:
-        applied_live = await execute_whitelist_command(clean_ign)
-    except Exception:
-        pass
-
-    avatar_url = f"https://mc-heads.net/avatar/{clean_ign.replace(' ', '%20')}/128"
-
-    embed = discord.Embed(
-        title="✅ Successfully Whitelisted on Aalu SMP!",
-        description=f"Welcome to the community, {user.mention}!\nYour account **`{clean_ign}`** has been registered to the whitelist.",
-        color=0x2ECC71
+    msg = mood_engine.format_mood_response(
+        "Arre mere bhai! Minecraft server permanently band ho chuka hai aur delete ho gaya hai. Ab Aalu YouTube streams par live game khelta hai! `/livetiming` type karo aur streams pe aao! 📺🎮"
     )
-    embed.set_thumbnail(url=avatar_url)
-    embed.add_field(name="🎮 Minecraft IGN", value=f"`{clean_ign}`", inline=True)
-    embed.add_field(name="⚡ Whitelist Status", value="**Active & Whitelisted**" if applied_live else "**Queued (Applies on boot)**", inline=True)
-    embed.add_field(name="☕ Java Connection", value=f"`{SERVER_HOST}:{SERVER_PORT}`\n*(Versions 1.7 to 1.21.x)*", inline=False)
-    embed.add_field(name="📱 Bedrock Connection", value=f"IP: `{SERVER_HOST}` | Port: `{SERVER_PORT}`", inline=False)
-
-    if prev_entry and prev_entry.get("ign") != clean_ign:
-        embed.set_footer(text=f"Updated from previous IGN: {prev_entry.get('ign')} • Tillu is always here to help!")
+    if is_inter:
+        await safe_send_interaction(interaction_or_ctx, msg, ephemeral=True)
     else:
-        embed.set_footer(text="Tillu • 24/7 Always-Online Active")
+        await interaction_or_ctx.send(msg)
 
-    await reply_fn(embed=embed, view=ServerControlView())
+async def handle_gamehistory_request(interaction_or_ctx, target_user: discord.Member | discord.User = None):
+    """Fetches public Discord gaming activity and game history for a member."""
+    is_inter = isinstance(interaction_or_ctx, discord.Interaction)
+    target = target_user or (interaction_or_ctx.user if is_inter else interaction_or_ctx.author)
+    embed = player_analytics.format_player_history_embed(target)
+    if is_inter:
+        await safe_send_interaction(interaction_or_ctx, embed=embed, ephemeral=True)
+    else:
+        await interaction_or_ctx.send(embed=embed)
 
-    if target_guild:
-        try:
-            mem = user if isinstance(user, discord.Member) else target_guild.get_member(user.id)
-            if not mem:
-                try:
-                    mem = await target_guild.fetch_member(user.id)
-                except Exception:
-                    pass
-            if mem:
-                import sync_manager
-                asyncio.create_task(sync_manager.sync_single_member(target_guild, mem, clean_ign))
-        except Exception:
-            pass
+async def handle_tagmember_request(interaction_or_ctx, query: str):
+    """Finds a member by name/role and sends a tagged mention message."""
+    is_inter = isinstance(interaction_or_ctx, discord.Interaction)
+    guild = interaction_or_ctx.guild
+    if not guild:
+        msg = "❌ Ye command sirf server me use ho sakti hai!"
+        if is_inter:
+            await safe_send_interaction(interaction_or_ctx, msg, ephemeral=True)
+        else:
+            await interaction_or_ctx.send(msg)
+        return
+
+    found = member_dir.fuzzy_find_member(guild, query)
+    if not found:
+        msg = f"🔍 Koi member `{query}` naam se nahi mila bhai!"
+        if is_inter:
+            await safe_send_interaction(interaction_or_ctx, msg, ephemeral=True)
+        else:
+            await interaction_or_ctx.send(msg)
+        return
+
+    channel = interaction_or_ctx.channel
+    tag_msg = f"👋 Arre {found.mention}, yahan aao! Aapko yaad kiya ja raha hai."
+    if channel:
+        await channel.send(tag_msg, allowed_mentions=discord.AllowedMentions(users=True))
+    if is_inter:
+        await safe_send_interaction(interaction_or_ctx, f"✅ Tagged {found.display_name} in <#{channel.id}>!", ephemeral=True)
 
 async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, bypass_cooldown: bool = False):
     """Processes user query with Gemini AI, supporting natural conversation and whitelist requests."""
@@ -2063,113 +1695,34 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
             telemetry.log_task(query, str(user), user_id, getattr(getattr(interaction_or_ctx, 'channel', None), 'name', 'direct'), getattr(getattr(interaction_or_ctx, 'channel', None), 'id', 0), TargetSystem.DISCORD.value, d_cmd, success=True, response_preview=clean_reply)
             return
 
-    # 1. Check for START_INTENT (Start server via MCP Panel)
+    # 1. Check for START_INTENT / Minecraft Queries
     if "START_INTENT:" in answer:
-        match = re.search(r'START_INTENT:\s*([^\n\r]+)', answer)
-        if match:
-            clean_reply = answer.replace(match.group(0), "").strip()
-            if clean_reply:
-                try:
-                    if hasattr(interaction_or_ctx, "channel") and not is_inter:
-                        await interaction_or_ctx.channel.send(content=clean_reply)
-                    else:
-                        await reply_fn(content=clean_reply)
-                except Exception:
-                    pass
-            await handle_start_request(interaction_or_ctx, user, guild=target_guild)
-            telemetry.log_task(query, str(user), user_id, getattr(getattr(interaction_or_ctx, 'channel', None), 'name', 'direct'), getattr(getattr(interaction_or_ctx, 'channel', None), 'id', 0), TargetSystem.MINECRAFT.value, "server_start", success=True)
-            return
-
-    # 2. Check for ADMIN_INTENT (Console / Moderation commands for Admin/Owner)
-    if "ADMIN_INTENT:" in answer:
-        match = re.search(r'ADMIN_INTENT:\s*([^\n\r]+)', answer)
-        if match:
-            cmd = match.group(1).strip()
-            # GUARD: Never send Discord management actions to Minecraft server console!
-            if any(w in cmd.lower() for w in ["purge", "unassignrole", "role", "channel", "/discord", "clear", "delete message", "timeout", "kick @", "ban @", "mute @"]):
-                logging.info(f"[AdminIntent Guard] Rerouting Discord action from Minecraft console: {cmd}")
-                if msg_obj and target_guild and is_admin:
-                    handled, d_resp = await parse_and_execute_discord_action(msg_obj, user, target_guild, cmd)
-                    if handled and d_resp:
-                        await reply_fn(content=d_resp)
-                        telemetry.log_task(query, str(user), user_id, getattr(getattr(interaction_or_ctx, 'channel', None), 'name', 'direct'), getattr(getattr(interaction_or_ctx, 'channel', None), 'id', 0), TargetSystem.DISCORD.value, cmd, success=True, response_preview=d_resp)
-                        return
-                clean_reply = answer.replace(match.group(0), "").strip()
-                if clean_reply:
-                    await reply_fn(content=clean_reply)
-                telemetry.log_task(query, str(user), user_id, getattr(getattr(interaction_or_ctx, 'channel', None), 'name', 'direct'), getattr(getattr(interaction_or_ctx, 'channel', None), 'id', 0), TargetSystem.DISCORD.value, cmd, success=True)
-                return
-
-            if not is_admin:
-                await reply_fn(content="🚫 Arre bhai, sirf Server Owner, Admins aur Moderators ke paas console ya ban/kick commands chalane ki permission hai!")
-                return
-
-            # If adjusting claim blocks, resolve closest player name and dispatch Bedrock fallback
-            if "adjustbonusclaimblocks" in cmd.lower() or "acb" in cmd.lower():
-                parts = cmd.split()
-                if len(parts) >= 2:
-                    raw_target = parts[1]
-                    res_p, _ = mc_resolver.resolve_closest_player(raw_target)
-                    if res_p:
-                        parts[1] = res_p
-                        cmd = " ".join(parts)
-                        if len(parts) >= 3:
-                            alt_p = res_p[1:] if res_p.startswith(".") else f".{res_p}"
-                            alt_quoted = f'"{alt_p}"' if " " in alt_p else alt_p
-                            await execute_server_command(f"{parts[0]} {alt_quoted} {parts[2]}")
-
-            ok, resp_str = await execute_server_command(cmd)
-
-            # If removing from whitelist, also clean local registry and sync role removal
-            if "whitelist remove" in cmd.lower():
-                wl_idx = cmd.lower().find("whitelist remove") + len("whitelist remove")
-                target_p = cmd[wl_idx:].strip().strip('"\'')
-                if target_p:
-                    if target_p.startswith("."):
-                        alt_p = target_p[1:]
-                        alt_q = f'"{alt_p}"' if " " in alt_p else alt_p
-                        await execute_server_command(f"whitelist remove {alt_q}")
-                    else:
-                        alt_p = f".{target_p}"
-                        alt_q = f'"{alt_p}"' if " " in alt_p else alt_p
-                        await execute_server_command(f"whitelist remove {alt_q}")
-                    await execute_server_command("whitelist reload")
-                    reg = load_whitelist_registry()
-                    new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower().lstrip('.') != target_p.lower().lstrip('.')}
-                    save_whitelist_registry(new_reg)
-                    if target_guild:
-                        import sync_manager
-                        for uid_str, udata in reg.items():
-                            if udata.get("ign", "").lower().lstrip('.') == target_p.lower().lstrip('.'):
-                                try:
-                                    mem = target_guild.get_member(int(uid_str))
-                                    if not mem:
-                                        try:
-                                            mem = await target_guild.fetch_member(int(uid_str))
-                                        except Exception:
-                                            pass
-                                    if mem:
-                                        asyncio.create_task(sync_manager.remove_single_member_sync(target_guild, mem))
-                                except Exception:
-                                    pass
-
-            clean_reply = answer.replace(match.group(0), "").strip()
-            status_tag = f"⚙️ **[Console Action: `{cmd}`]**"
-            channel_hint = f"\n*(Dispatched to <#{CONSOLE_CHANNEL_ID}> • Admins can also run commands directly in <#{CONSOLE_CHANNEL_ID}>)*"
-            if clean_reply:
-                await reply_fn(content=f"{status_tag}\n{clean_reply}{channel_hint}")
-            else:
-                await reply_fn(content=f"{status_tag}\nCommand successfully dispatched to <#{CONSOLE_CHANNEL_ID}>!{channel_hint}")
-            return
+        await handle_start_request(interaction_or_ctx, user, guild=target_guild)
+        return
 
     # 2. Check for Whitelist Intent
     if "WHITELIST_INTENT:" in answer:
-        match = re.search(r'WHITELIST_INTENT:\s*([a-zA-Z0-9_.* ]{3,20})', answer)
-        if match:
-            extracted_ign = match.group(1).strip()
-            logging.info(f"[Tillu Whitelist] Extracted IGN: '{extracted_ign}' from user: {user}")
-            await handle_whitelist_request(interaction_or_ctx, extracted_ign, user, guild=target_guild, bypass_cooldown=True)
-            return
+        await handle_whitelist_request(interaction_or_ctx, "", user, guild=target_guild, bypass_cooldown=True)
+        return
+
+    # 3. Check for YouTube Live Timing Intent
+    if "YOUTUBE_LIVE_INTENT:" in answer or classification.system == TargetSystem.YOUTUBE_LIVE:
+        live_resp = youtube_tracker.get_live_status_response()
+        await reply_fn(content=live_resp)
+        telemetry.log_task(query, str(user), user_id, getattr(getattr(interaction_or_ctx, 'channel', None), 'name', 'direct'), getattr(getattr(interaction_or_ctx, 'channel', None), 'id', 0), TargetSystem.YOUTUBE_LIVE.value, "live_timing", success=True, response_preview=live_resp[:100])
+        return
+
+    # 4. Check for Member Directory Intent
+    if "MEMBER_INTENT:" in answer or classification.system == TargetSystem.MEMBER_DIR:
+        await handle_members_request(interaction_or_ctx)
+        telemetry.log_task(query, str(user), user_id, getattr(getattr(interaction_or_ctx, 'channel', None), 'name', 'direct'), getattr(getattr(interaction_or_ctx, 'channel', None), 'id', 0), TargetSystem.MEMBER_DIR.value, "member_directory", success=True)
+        return
+
+    # 5. Check for Player Analytics Intent
+    if "GAME_INTENT:" in answer or classification.system == TargetSystem.PLAYER_ANALYTICS:
+        await handle_topgames_request(interaction_or_ctx)
+        telemetry.log_task(query, str(user), user_id, getattr(getattr(interaction_or_ctx, 'channel', None), 'name', 'direct'), getattr(getattr(interaction_or_ctx, 'channel', None), 'id', 0), TargetSystem.PLAYER_ANALYTICS.value, "game_history", success=True)
+        return
 
     # 3. Check for Bot Command Intent (Owner / Moderator controlling another bot)
     if "BOT_COMMAND:" in answer:
@@ -2324,77 +1877,54 @@ async def slash_ask(interaction: discord.Interaction, query: str, attachment: Op
                 logging.error(f"[slash_ask Attachment] Error: {e}")
     await handle_ask_request(interaction, query, user=interaction.user, guild=interaction.guild)
 
-@bot.tree.command(name="start", description="Turn on the Minecraft server (anyone can use this!)")
-async def slash_start(interaction: discord.Interaction):
-    await handle_start_request(interaction, user=interaction.user, guild=interaction.guild)
+@bot.tree.command(name="livetiming", description="Check Aalu's YouTube live stream timings & live status")
+async def slash_livetiming(interaction: discord.Interaction):
+    await handle_livetiming_request(interaction)
 
-@bot.tree.command(name="status", description="Check if the Minecraft server is online or offline")
+@bot.tree.command(name="status", description="Check Tillu status and YouTube stream status")
 async def slash_status(interaction: discord.Interaction):
     await handle_status_request(interaction, user=interaction.user, guild=interaction.guild)
 
-@bot.tree.command(name="whitelist", description="Self-service: Whitelist your Minecraft IGN to join the Aalu SMP!")
-@app_commands.describe(ign="Your exact in-game Minecraft username (Java or Bedrock)")
-async def slash_whitelist(interaction: discord.Interaction, ign: str):
-    await handle_whitelist_request(interaction, ign, user=interaction.user, guild=interaction.guild)
+@bot.tree.command(name="members", description="List server members and tag active people")
+@app_commands.describe(role="Optional role filter (e.g. Gamer, Member, Admin)")
+async def slash_members(interaction: discord.Interaction, role: Optional[str] = None):
+    await handle_members_request(interaction, role_filter=role)
 
-@bot.tree.command(name="console", description="Owner/Admin/Mod only: Run a command on the Minecraft server console")
-@app_commands.describe(command="The exact console command to execute (e.g. 'say Hello' or 'whitelist reload')")
-async def slash_console(interaction: discord.Interaction, command: str):
-    if not is_privileged_user(interaction.user, interaction.guild):
-        await safe_send_interaction(interaction, "🚫 Only Server Owner, Admins, and Moderators can execute console commands!", ephemeral=True)
-        return
-    ok, resp = await execute_server_command(command)
-    await safe_send_interaction(interaction, f"⚙️ **[Console Action: `{command}`]**\nDispatched to <#{CONSOLE_CHANNEL_ID}>! Check <#{CONSOLE_CHANNEL_ID}> for live execution.", ephemeral=True)
+@bot.tree.command(name="tagmember", description="Tag a server member by name or username")
+@app_commands.describe(name="Member name or partial query")
+async def slash_tagmember(interaction: discord.Interaction, name: str):
+    await handle_tagmember_request(interaction, name)
 
-@bot.tree.command(name="ban", description="Owner/Admin/Mod only: Ban a player from the Minecraft server")
-@app_commands.describe(player="Minecraft player username", reason="Reason for ban")
-async def slash_ban(interaction: discord.Interaction, player: str, reason: str = "Banned by administrator"):
-    if not is_privileged_user(interaction.user, interaction.guild):
-        await safe_send_interaction(interaction, "🚫 Only Server Owner, Admins, and Moderators can ban players!", ephemeral=True)
-        return
-    clean_p = player.strip()
-    target_arg = f'"{clean_p}"' if " " in clean_p else clean_p
-    await execute_server_command(f"ban {target_arg} {reason}")
-    await safe_send_interaction(interaction, f"🔨 **[Banned]** `{clean_p}` has been banned from the server! (Reason: {reason})\nDispatched to <#{CONSOLE_CHANNEL_ID}>.", ephemeral=True)
+@bot.tree.command(name="gamehistory", description="Check what games a member has played from their public Discord presence")
+@app_commands.describe(user="The member to inspect (leave blank for yourself)")
+async def slash_gamehistory(interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    await handle_gamehistory_request(interaction, target_user=user)
 
-@bot.tree.command(name="unban", description="Owner/Admin/Mod only: Unban a player from the Minecraft server")
-@app_commands.describe(player="Minecraft player username")
-async def slash_unban(interaction: discord.Interaction, player: str):
-    if not is_privileged_user(interaction.user, interaction.guild):
-        await safe_send_interaction(interaction, "🚫 Only Server Owner, Admins, and Moderators can unban players!", ephemeral=True)
-        return
-    clean_p = player.strip()
-    target_arg = f'"{clean_p}"' if " " in clean_p else clean_p
-    await execute_server_command(f"pardon {target_arg}")
-    await safe_send_interaction(interaction, f"🕊️ **[Unbanned]** `{clean_p}` has been pardoned.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.", ephemeral=True)
+@bot.tree.command(name="topgames", description="Show leaderboard of top games played by server members")
+async def slash_topgames(interaction: discord.Interaction):
+    await handle_topgames_request(interaction)
 
-@bot.tree.command(name="unwhitelist", description="Owner/Admin/Mod only: Remove a player from the Minecraft whitelist")
-@app_commands.describe(player="Minecraft player username to remove")
-async def slash_unwhitelist(interaction: discord.Interaction, player: str):
+@bot.tree.command(name="usebot", description="Tell Tillu to trigger or send a command to another bot in the server")
+@app_commands.describe(command="Command to execute (e.g. '!tts hello' or '!p lofi')")
+async def slash_usebot(interaction: discord.Interaction, command: str):
     if not is_privileged_user(interaction.user, interaction.guild):
-        await safe_send_interaction(interaction, "🚫 Only Server Owner, Admins, and Moderators can remove whitelist!", ephemeral=True)
+        await safe_send_interaction(interaction, "🚫 Sirf Server Owner aur Staff hi doosre bots ko command dene bol sakte hain!", ephemeral=True)
         return
-    clean_p = player.strip()
-    await execute_unwhitelist_command(clean_p)
-    reg = load_whitelist_registry()
-    new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower().lstrip(".") != clean_p.lower().lstrip(".")}
-    save_whitelist_registry(new_reg)
-    if interaction.guild:
-        import sync_manager
-        for uid_str, udata in reg.items():
-            if udata.get("ign", "").lower().lstrip(".") == clean_p.lower().lstrip("."):
-                try:
-                    mem = interaction.guild.get_member(int(uid_str))
-                    if not mem:
-                        try:
-                            mem = await interaction.guild.fetch_member(int(uid_str))
-                        except Exception:
-                            pass
-                    if mem:
-                        asyncio.create_task(sync_manager.remove_single_member_sync(interaction.guild, mem))
-                except Exception:
-                    pass
-    await safe_send_interaction(interaction, f"🗑️ **[Whitelist Removed]** `{clean_p}` removed from whitelist.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.", ephemeral=True)
+    success, resp = await bot_orch.execute_bot_command(interaction.channel, command)
+    await safe_send_interaction(interaction, resp, ephemeral=True)
+
+@bot.tree.command(name="mood", description="Check Tillu's active mood or set a specific persona")
+@app_commands.describe(mood_name="Optional mood: sarcastic, funny, sad_sarcastic, wholesome, savage")
+async def slash_mood(interaction: discord.Interaction, mood_name: Optional[str] = None):
+    if mood_name:
+        if not is_privileged_user(interaction.user, interaction.guild):
+            await safe_send_interaction(interaction, "🚫 Sirf Server Owner aur Staff mood change kar sakte hain!", ephemeral=True)
+            return
+        m = mood_engine.set_fixed_mood(mood_name)
+        await safe_send_interaction(interaction, f"🎭 Tillu ka mood set ho gaya: **{m.value.upper()}**!", ephemeral=True)
+    else:
+        curr = mood_engine.current_mood.value
+        await safe_send_interaction(interaction, f"🎭 Tillu's current dynamic mood is **{curr.upper()}**!\n(Available moods: `sarcastic`, `funny`, `sad_sarcastic`, `wholesome`, `savage`)", ephemeral=True)
 
 @bot.tree.command(name="remember", description="Teach Tillu a fact, rule, or server setting to remember permanently")
 @app_commands.describe(fact="What should Tillu remember? (e.g. 'Server rules: No griefing' or 'End dimension opens on Sunday')")
@@ -2556,21 +2086,21 @@ async def slash_audit(interaction: discord.Interaction):
 @bot.tree.command(name="help", description="Show Tillu bot commands & features")
 async def slash_help(interaction: discord.Interaction):
     embed = discord.Embed(
-        title="🤖 Tillu Bot Commands",
-        description="I am Tillu, your server assistant! Here's how you can talk to me:",
+        title="🤖 Tillu Bot — Stream Co-Host & Community Assistant",
+        description="I am Tillu, your sarcastic & witty co-host! Here's how you can talk to me:",
         color=0x9B59B6
     )
-    embed.add_field(name="💬 Talk Naturally", value="Just type `tillu <question>` or `@Tillu <question>` anywhere in chat!", inline=False)
-    embed.add_field(name="🧠 Teach & Remember", value="`tillu yaad rakh <baat>` or `/remember <fact>` (Owner/Admins save directly; Members send review ticket)", inline=False)
-    embed.add_field(name="📖 View Memories", value="`/memories` to see learned server knowledge", inline=False)
-    embed.add_field(name="🎟️ Whitelist Me", value="Say `tillu whitelist me <IGN>` or `/whitelist <ign>`", inline=False)
-    embed.add_field(name="🚀 Turn On Server", value="`/start`, `!start`, or the green button below", inline=False)
-    embed.add_field(name="🔍 Check Status", value="`/status`, `!status`, or `!ip`", inline=False)
-    embed.add_field(name="👑 Admin Commands", value="`!c <cmd>`, `!ban <player>`, `!unban <player>`, `!kick <player>`, `!unwhitelist <player>`", inline=False)
-    embed.add_field(name="🎚️ Live Server Console", value=f"Owner, Admins & Mods can type Minecraft commands directly in <#{CONSOLE_CHANNEL_ID}> anytime without visiting the website panel!", inline=False)
-    embed.add_field(name="⏱️ Cooldown", value="20s cooldown for members • **0s cooldown** for Owner, Admins & Mods", inline=False)
-    embed.set_footer(text="Tillu • 24/7 Always-Online Active")
-    await safe_send_interaction(interaction, embed=embed, view=ServerControlView(), ephemeral=True)
+    embed.add_field(name="💬 Chat Naturally", value="Just type `tillu <question>` or `@Tillu <question>` anywhere in chat!", inline=False)
+    embed.add_field(name="📺 YouTube Live Timings", value="`/livetiming` or `!livetiming` — Live stream updates for @AALU_CHIPAS", inline=False)
+    embed.add_field(name="👥 Member Directory", value="`/members [role]` and `/tagmember <name>` to find & tag anyone!", inline=False)
+    embed.add_field(name="🎮 Game Analytics", value="`/gamehistory [@user]` and `/topgames` to track gaming history", inline=False)
+    embed.add_field(name="🤖 Inter-Bot Power", value="`/usebot <command>` or `tillu tell <bot> to <action>` to command other bots", inline=False)
+    embed.add_field(name="🎭 Dynamic Mood", value="`/mood` to check Tillu's mood (Sarcastic, Funny, Sad Sarcastic, Wholesome)", inline=False)
+    embed.add_field(name="🧠 Teach & Remember", value="`tillu yaad rakh <baat>` or `/remember <fact>`", inline=False)
+    embed.add_field(name="📖 View Memories", value="`/memories` to see learned knowledge", inline=False)
+    embed.add_field(name="🔍 Daily Self-Audit", value="`/audit` to trigger Tillu's autonomous self-reflection & bot discovery", inline=False)
+    embed.set_footer(text="Tillu • 24/7 Always-Online Co-Host")
+    await safe_send_interaction(interaction, embed=embed, view=CommunityView(), ephemeral=True)
 
 # ── TEXT COMMANDS ────────────────────────────────────────────────────────────
 @bot.command(name="update", aliases=["pull", "gitpull", "selfupdate"])
@@ -2728,114 +2258,30 @@ async def cmd_backups(ctx):
         return await ctx.send("📂 Abhi tak koi backup snapshot create nahi hua hai. `!backup` se create karo!")
     await ctx.send(f"📂 **Available Backups:**\n" + "\n".join(f"• `{b}`" for b in b_list[:5]))
 
-@bot.command(name="sync", aliases=["syncroles", "livesync"])
-async def cmd_sync(ctx):
-    if not ctx.guild:
-        return await ctx.send("❌ Ye command sirf server ke andar use kar sakte hain!")
-    if not (ctx.author.guild_permissions.administrator or ctx.guild.owner_id == ctx.author.id):
-        return await ctx.send("🚫 Sirf Server Owner ya Administrators hi sync trigger kar sakte hain!")
-    import sync_manager
-    msg_wait = await ctx.send("🔄 **Minecraft Live Sync running...** Checking registered players...")
-    reg = load_whitelist_registry()
-    checked, assigned = await sync_manager.sync_guild_roles(ctx.guild, reg)
-    await msg_wait.edit(content=f"✅ **Live Sync Complete!** `{checked}` registered players check hue, `{assigned}` naye Whitelisted roles assign kiye gaye!")
+@bot.command(name="livetiming", aliases=["stream", "live", "timing", "youtube"])
+async def cmd_livetiming(ctx):
+    await handle_livetiming_request(ctx)
 
-@bot.command(name="claim", aliases=["drop", "claimdrop", "freedrop"])
-async def cmd_claim_drop(ctx):
-    if not ctx.guild:
-        return await ctx.send("❌ Ye command sirf server ke andar use kar sakte hain!")
-    import rewards_manager
-    success, reward, msg = rewards_manager.claim_drop(ctx.author.id)
-    if not success:
-        return await ctx.send(f"{ctx.author.mention} {msg}")
+@bot.command(name="members", aliases=["memberlist", "who"])
+async def cmd_members(ctx, *, role: str = None):
+    await handle_members_request(ctx, role_filter=role)
 
-    pending = rewards_manager.get_pending_claims(ctx.author.id)
-    embed = discord.Embed(
-        title="🎁 Free Minecraft Chat Drop Claimed!",
-        description=f"Congratulations {ctx.author.mention}! Reward tumhare **Tillu Vault** me store ho gaya hai!",
-        color=reward.get("color", 0xF1C40F)
-    )
-    embed.add_field(name="📦 Reward Added", value=f"**{reward['emoji']} {reward['name']}**", inline=True)
-    embed.add_field(name="✨ Rarity", value=f"`{reward['rarity']}`", inline=True)
-    embed.add_field(name="🏦 Vault Balance", value=f"`{len(pending)}` item(s) pending", inline=True)
-    embed.add_field(
-        name="🚀 In-Game Deliver Karne Ka Tarika",
-        value="Server me aao aur bolo:\n• `tillu send my claims to my account`\n• `tillu send my claims to <account_name>`\n• ya `!sendclaims [account_name]`",
-        inline=False
-    )
-    embed.set_footer(text="Tillu • Minecraft MCP Cloud Rewards")
-    await ctx.send(embed=embed)
+@bot.command(name="gamehistory", aliases=["gh", "history", "games"])
+async def cmd_gamehistory(ctx, member: discord.Member = None):
+    await handle_gamehistory_request(ctx, target_user=member)
 
-@bot.command(name="sendclaims", aliases=["deliverclaims", "sendclaim"])
-async def cmd_send_claims(ctx, *, target_account: str = ""):
-    if not ctx.guild:
-        return await ctx.send("❌ Ye command sirf server ke andar use kar sakte hain!")
-    import rewards_manager
-    reg = load_whitelist_registry()
-    uid = str(ctx.author.id)
-    entry = reg.get(uid, {})
-    linked_ign = entry.get("ign")
+@bot.command(name="topgames", aliases=["leaderboard", "populargames"])
+async def cmd_topgames(ctx):
+    await handle_topgames_request(ctx)
 
-    target_ign = re.sub(r'^(?:to\s+)', '', target_account.strip(), flags=re.IGNORECASE).strip()
-    if not target_ign or target_ign.lower() in ["my account", "me", "self", "my"]:
-        if not linked_ign:
-            return await ctx.send(f"❌ {ctx.author.mention}, tumhara koi account linked nahi hai! Apna IGN do: `!sendclaims <account_name>` ya pehle `!whitelist <ign>` karo.")
-        target_ign = linked_ign
-
-    msg_wait = await ctx.send(f"⏳ Delivering vault claims to `{target_ign}` via Minecraft console...")
-    success, items, msg = await asyncio.to_thread(rewards_manager.send_claims_to_account, ctx.author.id, target_ign, panel_send_command)
-    if not success:
-        return await msg_wait.edit(content=f"{ctx.author.mention} {msg}")
-
-    embed = discord.Embed(
-        title="🚀 Claims Delivered In-Game!",
-        description=f"All claims have been transferred to **`{target_ign}`** in Minecraft!",
-        color=0x2ECC71
-    )
-    embed.set_thumbnail(url=f"https://mc-heads.net/avatar/{target_ign.replace(' ', '%20')}/128")
-    items_list = "\n".join(f"• {it['emoji']} **{it['name']}** (`{it['rarity']}`)" for it in items)
-    embed.add_field(name="📦 Delivered Items", value=items_list or "Items delivered", inline=False)
-    embed.set_footer(text="Tillu • Minecraft MCP Cloud Rewards")
-    await msg_wait.delete()
-    await ctx.send(embed=embed)
-
-@bot.command(name="vault", aliases=["myclaims", "pendingclaims"])
-async def cmd_vault(ctx):
-    import rewards_manager
-    pending = rewards_manager.get_pending_claims(ctx.author.id)
-    if not pending:
-        return await ctx.send(f"📭 {ctx.author.mention}, tumhare vault me koi pending items nahi hain! Chat karo aur `!claim` se naya drop lo.")
-    items_list = "\n".join(f"• {it['emoji']} **{it['name']}** (`{it['rarity']}`)" for it in pending)
-    embed = discord.Embed(
-        title="🏦 Your Tillu Rewards Vault",
-        description=f"{ctx.author.mention}, tumhare paas `{len(pending)}` pending items hain:\n\n{items_list}",
-        color=0x9B59B6
-    )
-    embed.add_field(
-        name="🚀 Deliver Kaise Kare?",
-        value="Bolo: `tillu send my claims to my account` ya `tillu send my claims to <account_name>` (ya `!sendclaims`)",
-        inline=False
-    )
-    await ctx.send(embed=embed)
-
-@bot.command(name="dropstatus", aliases=["claimstatus"])
-async def cmd_drop_status(ctx):
-    import rewards_manager
-    can_claim, remaining, total = rewards_manager.get_drop_status(ctx.author.id)
-    pending = rewards_manager.get_pending_claims(ctx.author.id)
-    reg = load_whitelist_registry()
-    ign = reg.get(str(ctx.author.id), {}).get("ign", "Not Linked")
-    if can_claim:
-        await ctx.send(f"🎉 {ctx.author.mention}, tumhara free drop ready hai! Claim karne ke liye `!claim` type karo! (Vault: `{len(pending)}` pending, Linked IGN: `{ign}`, Total Claims: `{total}`)")
+@bot.command(name="mood", aliases=["setmood", "personality"])
+async def cmd_mood(ctx, *, mood_name: str = None):
+    if mood_name and is_privileged_user(ctx.author, ctx.guild):
+        m = mood_engine.set_fixed_mood(mood_name)
+        await ctx.send(f"🎭 Tillu ka mood set ho gaya: **{m.value.upper()}**!")
     else:
-        mins = remaining // 60
-        secs = remaining % 60
-        await ctx.send(f"⏳ {ctx.author.mention}, agla drop claim karne ke liye **{mins}m {secs}s** wait karo. (Vault: `{len(pending)}` pending, Linked IGN: `{ign}`, Total Claims: `{total}`)")
-
-@bot.command(name="players", aliases=["list", "listplayers", "whosonline", "onlineplayers", "whosplaying"])
-async def cmd_players(ctx):
-    """Check live online Minecraft players and roles directly from server console."""
-    await handle_players_command(ctx.channel, ctx.author)
+        curr = mood_engine.current_mood.value
+        await ctx.send(f"🎭 Tillu's current dynamic mood is **{curr.upper()}**!\n(Available moods: `sarcastic`, `funny`, `sad_sarcastic`, `wholesome`, `savage`)")
 
 @bot.command(name="addbot", aliases=["invitebot", "botinvite"])
 async def cmd_addbot(ctx, *, bot_query: str = None):
@@ -2899,104 +2345,6 @@ async def cmd_listbots(ctx):
     bot_names = ", ".join(f"`{b.name}`" for b in bots)
     await ctx.send(f"🤖 **Detected Bots ({len(bots)}):** {bot_names}\n*(Owner/Mods can tell Tillu to run commands for them!)*")
 
-@bot.command(name="c", aliases=["console", "cmd"])
-async def cmd_console(ctx, *, command: str = None):
-    if not is_privileged_user(ctx.author, ctx.guild):
-        await ctx.send("🚫 Only Server Owner, Admins, and Moderators can execute console commands!")
-        return
-    if not command:
-        await ctx.send(f"❌ Usage: `!c <minecraft command>` (e.g. `!c say hello` or `!c whitelist reload`)\n💡 Tip: You can also type directly in <#{CONSOLE_CHANNEL_ID}> without visiting the website panel!")
-        return
-    ok, resp = await execute_server_command(command)
-    await ctx.send(f"⚙️ **[Console Action: `{command}`]**\nDispatched to <#{CONSOLE_CHANNEL_ID}>! Check <#{CONSOLE_CHANNEL_ID}> for live execution.")
-
-@bot.command(name="ban")
-async def cmd_ban(ctx, player: str = None, *, reason: str = "Banned by administrator"):
-    if not is_privileged_user(ctx.author, ctx.guild):
-        await ctx.send("🚫 Only Server Owner, Admins, and Moderators can ban players!")
-        return
-    if not player:
-        await ctx.send("❌ Usage: `!ban <player> [reason]`")
-        return
-    clean_p = player.strip()
-    target_arg = f'"{clean_p}"' if " " in clean_p else clean_p
-    await execute_server_command(f"ban {target_arg} {reason}")
-    await ctx.send(f"🔨 **[Banned]** `{clean_p}` has been banned from the server! (Reason: {reason})\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
-
-@bot.command(name="unban", aliases=["pardon"])
-async def cmd_unban(ctx, player: str = None):
-    if not is_privileged_user(ctx.author, ctx.guild):
-        await ctx.send("🚫 Only Server Owner, Admins, and Moderators can unban players!")
-        return
-    if not player:
-        await ctx.send("❌ Usage: `!unban <player>`")
-        return
-    clean_p = player.strip()
-    target_arg = f'"{clean_p}"' if " " in clean_p else clean_p
-    await execute_server_command(f"pardon {target_arg}")
-    await ctx.send(f"🕊️ **[Unbanned]** `{clean_p}` has been pardoned on the server.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
-
-@bot.command(name="kick")
-async def cmd_kick(ctx, player: str = None, *, reason: str = "Kicked by administrator"):
-    if not is_privileged_user(ctx.author, ctx.guild):
-        await ctx.send("🚫 Only Server Owner, Admins, and Moderators can kick players!")
-        return
-    if not player:
-        await ctx.send("❌ Usage: `!kick <player> [reason]`")
-        return
-    clean_p = player.strip()
-    target_arg = f'"{clean_p}"' if " " in clean_p else clean_p
-    await execute_server_command(f"kick {target_arg} {reason}")
-    await ctx.send(f"👢 **[Kicked]** `{clean_p}` has been kicked from the server!\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
-
-@bot.command(name="unwhitelist", aliases=["wlremove", "removewhitelist"])
-async def cmd_unwhitelist(ctx, player: str = None):
-    if not is_privileged_user(ctx.author, ctx.guild):
-        await ctx.send("🚫 Only Server Owner, Admins, and Moderators can remove whitelist!")
-        return
-    if not player:
-        await ctx.send("❌ Usage: `!unwhitelist <player>`")
-        return
-    clean_p = player.strip()
-    await execute_unwhitelist_command(clean_p)
-    reg = load_whitelist_registry()
-    new_reg = {k: v for k, v in reg.items() if v.get("ign", "").lower().lstrip(".") != clean_p.lower().lstrip(".")}
-    save_whitelist_registry(new_reg)
-    if ctx.guild:
-        import sync_manager
-        for uid_str, udata in reg.items():
-            if udata.get("ign", "").lower().lstrip(".") == clean_p.lower().lstrip("."):
-                try:
-                    mem = ctx.guild.get_member(int(uid_str))
-                    if not mem:
-                        try:
-                            mem = await ctx.guild.fetch_member(int(uid_str))
-                        except Exception:
-                            pass
-                    if mem:
-                        asyncio.create_task(sync_manager.remove_single_member_sync(ctx.guild, mem))
-                except Exception:
-                    pass
-    await ctx.send(f"🗑️ **[Whitelist Removed]** `{clean_p}` has been removed from the whitelist.\nDispatched to <#{CONSOLE_CHANNEL_ID}>.")
-
-
-@bot.command(name="claimblocks", aliases=["giveclaims", "landclaim", "claimland", "acb"])
-async def cmd_claimblocks(ctx, player: str = None, amount: int = 10000000):
-    """Admin command to grant GriefPrevention claim blocks to a player."""
-    if not is_privileged_user(ctx.author, ctx.guild):
-        await ctx.send("🚫 Arre bhai, Minecraft me claim land ya bonus claim blocks allocate karne ki permission sirf Server Owner aur Admins ke paas hai! 🏰")
-        return
-    if not player:
-        await ctx.send("❌ Usage: `!claimblocks <player> [amount]` (Default amount is 10,000,000 for unlimited claim land)")
-        return
-    await mc_resolver.harvest_players_from_discord(bot, ctx.guild)
-    res_ign, _ = mc_resolver.resolve_closest_player(player)
-    target = res_ign or player.strip()
-    ok, msg = await mc_resolver.execute_claim_land_command(target, amount, execute_server_command)
-    amt_str = "unlimited (10,000,000)" if amount >= 10000000 else f"{amount:,}"
-    await ctx.send(f"🏰 **Done Boss!** Minecraft player `{target}` ko **{amt_str} claim blocks** de diye gaye hain! (GriefPrevention land claim active) ✨\n*(Dispatched to console <#{CONSOLE_CHANNEL_ID}>)*")
-
-
 @bot.command(name="start", aliases=["startserver", "turnon", "on"])
 async def cmd_start(ctx):
     await handle_start_request(ctx, user=ctx.author, guild=ctx.guild)
@@ -3012,19 +2360,20 @@ async def cmd_whitelist(ctx, *, ign: str = None):
 @bot.command(name="help")
 async def cmd_help(ctx):
     embed = discord.Embed(
-        title="🤖 Tillu Bot Commands",
-        description="I am Tillu, your server assistant! Here's how you can talk to me:",
+        title="🤖 Tillu Bot — Stream Co-Host & Community Assistant",
+        description="I am Tillu, your sarcastic & witty co-host! Here's how you can talk to me:",
         color=0x9B59B6
     )
-    embed.add_field(name="💬 Talk Naturally", value="Just type `tillu <question>` or `@Tillu <question>` anywhere in chat!", inline=False)
-    embed.add_field(name="🎟️ Whitelist Me", value="Say `tillu whitelist me <IGN>` or `/whitelist <ign>`", inline=False)
-    embed.add_field(name="🚀 Turn On Server", value="`!start` or `/start`", inline=False)
-    embed.add_field(name="🔍 Check Status", value="`!status` or `/status`", inline=False)
-    embed.add_field(name="👑 Admin Commands", value="`!c <cmd>`, `!ban <player>`, `!unban <player>`, `!kick <player>`, `!unwhitelist <player>`", inline=False)
-    embed.add_field(name="🎚️ Live Server Console", value=f"Owner, Admins & Mods can type Minecraft commands directly in <#{CONSOLE_CHANNEL_ID}> anytime without visiting the website panel!", inline=False)
-    embed.add_field(name="⏱️ Cooldown", value="20s cooldown for members • **0s cooldown** for Owner, Admins & Mods", inline=False)
-    embed.set_footer(text="Tillu • 24/7 Cloud Host")
-    await ctx.send(embed=embed, view=ServerControlView())
+    embed.add_field(name="💬 Chat Naturally", value="Just type `tillu <question>` or `@Tillu <question>` anywhere in chat!", inline=False)
+    embed.add_field(name="📺 YouTube Live Timings", value="`!livetiming` or `/livetiming` — Live stream updates for @AALU_CHIPAS", inline=False)
+    embed.add_field(name="👥 Member Directory", value="`!members [role]` and `/tagmember <name>` to find & tag anyone!", inline=False)
+    embed.add_field(name="🎮 Game Analytics", value="`!gamehistory [@user]` and `!topgames` to track gaming history", inline=False)
+    embed.add_field(name="🤖 Inter-Bot Power", value="`!botcmd <cmd>` or `/usebot <cmd>` to command other bots", inline=False)
+    embed.add_field(name="🎭 Dynamic Mood", value="`!mood` to check Tillu's mood (Sarcastic, Funny, Sad Sarcastic, Wholesome)", inline=False)
+    embed.add_field(name="🧠 Teach & Remember", value="`tillu yaad rakh <baat>` or `/remember <fact>`", inline=False)
+    embed.add_field(name="📖 View Memories", value="`/memories` to see learned knowledge", inline=False)
+    embed.set_footer(text="Tillu • 24/7 Always-Online Co-Host")
+    await ctx.send(embed=embed, view=CommunityView())
 
 async def delayed_video_reply(message: discord.Message):
     try:
@@ -3116,195 +2465,49 @@ async def on_member_join(member: discord.Member):
     if channel:
         welcome_text = (
             f"🎉 **Arre swagat hai, {member.mention}!** Welcome to **{guild.name}**!\n"
-            f"Mai hu **Tillu**, aapka dost aur server assistant! 🤖\n\n"
-            f"Agar humare Minecraft server me khelna hai, toh bas mujhe bolo `tillu whitelist me <IGN>` ya neeche button se whitelist karlo! Have fun! 🚀"
+            f"Mai hu **Tillu**, aapka sarcastic & witty co-host! 🤖\n\n"
+            f"• Aalu ki YouTube live stream timings janne ke liye `/livetiming` type karo!\n"
+            f"• Server me kaun kya khel raha hai dekhne ke liye `/topgames` ya `/gamehistory` check karo!\n"
+            f"• Kisi bhi cheez ke liye bas `@Tillu` bol ke puch lo! 🚀"
         )
         embed = discord.Embed(
-            title="👋 Welcome to the Community!",
+            title="👋 Welcome to the Aalu Community!",
             description=welcome_text,
-            color=0x2ECC71
+            color=0x9B59B6
         )
         embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="☕ Java & Bedrock IP", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
-        embed.set_footer(text="Tillu • 24/7 Always-Online Active")
+        embed.add_field(name="📺 YouTube Channel", value="[@AALU_CHIPAS](https://youtube.com/@AALU_CHIPAS)", inline=False)
+        embed.set_footer(text="Tillu • 24/7 Always-Online Co-Host")
         try:
-            await channel.send(embed=embed, view=ServerControlView())
+            await channel.send(embed=embed, view=CommunityView())
         except Exception as e:
             logging.error(f"[on_member_join] Error sending welcome: {e}")
 
-def format_whitelisted_players_embed(content: str) -> Optional[discord.Embed]:
-    """Parse raw console whitelist output and format arranged by alphabet first, then other characters."""
-    if "no whitelisted player" in content.lower():
-        embed = discord.Embed(
-            title="📋 Whitelisted Players (0 Total)",
-            description="Koi bhi player whitelist me nahi hai! (No whitelisted players found)",
-            color=0xE74C3C,
-            timestamp=discord.utils.utcnow()
-        )
-        embed.set_footer(text="Arranged Alphabetically (A–Z) followed by Symbols • Tillu Auto-Formatter")
-        return embed
+@bot.event
+async def on_presence_update(before: discord.Member, after: discord.Member):
+    """Tracks member gaming presence into public game history."""
+    try:
+        player_analytics.record_presence(after)
+    except Exception as e:
+        logging.debug(f"[Presence Update] Error: {e}")
 
-    match = re.search(r'whitelisted player\(s\):\s*([^\n\r]+)', content, re.IGNORECASE)
-    if not match:
-        return None
-
-    raw_list = re.sub(r'[\r\n`]+', '', match.group(1)).strip()
-    players = [p.strip() for p in raw_list.split(',') if p.strip()]
-    if not players:
-        return None
-
-    # Deduplicate while preserving case
-    unique_players = list(dict.fromkeys(players))
-
-    # Arrange: Alphabetical (A-Z) first, then other characters/symbols (e.g. '.', '_', digits)
-    alpha_players = sorted([p for p in unique_players if p and p[0].isalpha()], key=lambda x: x.lower())
-    other_players = sorted([p for p in unique_players if p and not p[0].isalpha()], key=lambda x: x.lower())
-
+async def handle_players_command(channel, user=None):
+    """Redirects legacy !players command to top games and active community players."""
+    top_games = player_analytics.get_top_games()
     embed = discord.Embed(
-        title=f"📋 Whitelisted Players ({len(unique_players)} Total)",
+        title="🎮 Community Top Games & Player Activity",
+        description="Aalu SMP Minecraft server permanently close ho chuka hai! Ye hai humari community ka gaming activity:",
         color=0x2ECC71,
         timestamp=discord.utils.utcnow()
     )
-
-    if alpha_players:
-        chunk = ""
-        alpha_fields = []
-        for p in alpha_players:
-            item = f"`{p}` "
-            if len(chunk) + len(item) > 1000:
-                alpha_fields.append(chunk)
-                chunk = item
-            else:
-                chunk += item
-        if chunk:
-            alpha_fields.append(chunk)
-
-        for idx, f_text in enumerate(alpha_fields):
-            fname = f"🔤 Alphabetical (A–Z) [{len(alpha_players)}]" if idx == 0 else "🔤 Alphabetical (Cont.)"
-            embed.add_field(name=fname, value=f_text, inline=False)
-
-    if other_players:
-        chunk = ""
-        other_fields = []
-        for p in other_players:
-            item = f"`{p}` "
-            if len(chunk) + len(item) > 1000:
-                other_fields.append(chunk)
-                chunk = item
-            else:
-                chunk += item
-        if chunk:
-            other_fields.append(chunk)
-
-        for idx, f_text in enumerate(other_fields):
-            fname = f"📱 Bedrock / Other Characters [{len(other_players)}]" if idx == 0 else "📱 Bedrock / Other Characters (Cont.)"
-            embed.add_field(name=fname, value=f_text, inline=False)
-
-    embed.set_footer(text="Arranged Alphabetically (A–Z) followed by Symbols • Tillu Auto-Formatter")
-    return embed
-
-def strip_console_prefix(line: str) -> str:
-    """Strips timestamps, thread prefixes like [Server thread/INFO]: from console output."""
-    return re.sub(r'^(?:\[[^\]]+\]\s*)+:?\s*', '', line).strip()
-
-def format_online_players_embed(content: str) -> Optional[discord.Embed]:
-    """Parse raw console '/list' output and format into a rich embed."""
-    clean = content.strip()
-    count_m = re.search(r'There are (\d+)(?:\s+(?:out\s+of\s+maximum|of\s+a\s+max\s+of)\s+(\d+))?\s+players\s+online', clean, re.IGNORECASE)
-    online_count = int(count_m.group(1)) if count_m else 0
-    max_count = int(count_m.group(2)) if (count_m and count_m.group(2)) else 50
-
-    embed = discord.Embed(
-        title=f"🎮 Live Minecraft Players ({online_count}/{max_count})",
-        color=0x2ECC71 if online_count > 0 else 0x95A5A6,
-        timestamp=discord.utils.utcnow()
-    )
-
-    if online_count == 0:
-        embed.description = "Abhi server pe koi player online nahi hai! (No players currently online)\nJoin karke pehle player bano! 🚀"
-        embed.add_field(name="☕ Server IP", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
-        embed.set_footer(text="Tillu • Live Console Telemetry")
-        return embed
-
-    # Parse groups and player names
-    player_groups = {}
-    lines = [strip_console_prefix(l) for l in clean.splitlines() if strip_console_prefix(l)]
-
-    for l in lines:
-        if ':' in l and 'players online' not in l.lower():
-            parts = l.split(':', 1)
-            group_name = parts[0].strip().title()
-            p_names = [p.strip() for p in parts[1].split(',') if p.strip()]
-            if p_names:
-                player_groups[group_name] = p_names
-
-    if not player_groups:
-        for l in lines:
-            if 'players online' in l.lower() and ':' in l:
-                after_colon = l.split(':', 1)[-1].strip()
-                p_names = [p.strip() for p in after_colon.split(',') if p.strip()]
-                if p_names and p_names != [l]:
-                    player_groups["Online Players"] = p_names
-                    break
-
-    if player_groups:
-        for grp, members in player_groups.items():
-            formatted_list = " • ".join(f"`{m}`" for m in members)
-            embed.add_field(name=f"👑 {grp} [{len(members)}]", value=formatted_list, inline=False)
+    if not top_games:
+        embed.description += "\n\n*Abhi tak koi game play session record nahi hua!*"
     else:
-        embed.description = f"**{online_count}** player(s) abhi server pe khel rahe hain!"
-
-    embed.add_field(name="☕ Server IP", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
-    embed.set_footer(text="Tillu • Live Console Telemetry")
-    return embed
-
-async def handle_players_command(channel, user=None):
-    """Sends '/list' to console, captures output, and displays live player count and names in chat."""
-    status_msg = await channel.send("🔍 **Fetching live players from Minecraft console...**")
-
-    # Send 'list' command to console
-    await execute_server_command("list")
-
-    # Wait for response in console channel or fallback to server ping
-    try:
-        def check(m):
-            return m.channel.id == CONSOLE_CHANNEL_ID and "players online" in (m.content or "").lower()
-        resp_msg = await bot.wait_for("message", check=check, timeout=5.0)
-        full_content = resp_msg.content or ""
-
-        # If online_count > 0 and no group lines were present in this single message, check if following lines arrive
-        count_m = re.search(r'There are (\d+)', full_content, re.IGNORECASE)
-        online_cnt = int(count_m.group(1)) if count_m else 0
-        if online_cnt > 0 and ":" not in full_content.splitlines()[-1]:
-            try:
-                next_msg = await bot.wait_for(
-                    "message",
-                    check=lambda m: m.channel.id == CONSOLE_CHANNEL_ID and m.id != resp_msg.id,
-                    timeout=1.5
-                )
-                if next_msg and next_msg.content:
-                    full_content += "\n" + next_msg.content
-            except asyncio.TimeoutError:
-                pass
-
-        embed = format_online_players_embed(full_content)
-        if embed:
-            await status_msg.edit(content=None, embed=embed)
-            return
-    except asyncio.TimeoutError:
-        pass
-
-    # Fallback to direct SLP Ping if console didn't respond in time
-    is_up, desc, online, max_p, ver = await asyncio.to_thread(ping_minecraft_server)
-    embed = discord.Embed(
-        title=f"🎮 Live Minecraft Players ({online}/{max_p})",
-        description=f"Status: **{desc}**\nVersion: `{ver}`",
-        color=0x2ECC71 if is_up and online > 0 else (0xF1C40F if is_up else 0xE74C3C),
-        timestamp=discord.utils.utcnow()
-    )
-    embed.add_field(name="☕ Server IP", value=f"`{SERVER_HOST}:{SERVER_PORT}`", inline=False)
-    embed.set_footer(text="Tillu • Live Server Telemetry")
-    await status_msg.edit(content=None, embed=embed)
+        lines = []
+        for i, (g_name, p_count, hours) in enumerate(top_games, start=1):
+            lines.append(f"**{i}. {g_name}** — `{p_count} players` (~{hours} hrs logged)")
+        embed.add_field(name="Leaderboard", value="\n".join(lines), inline=False)
+    await channel.send(embed=embed)
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -3316,37 +2519,10 @@ async def on_message(message: discord.Message):
     if not raw_text and message.embeds:
         raw_text = " ".join([e.description or "" for e in message.embeds if e.description])
 
-    # ── CONSOLE & CHAT CHANNELS: Harvest live player names from DiscordSRV ──
-    if message.channel.id in [CONSOLE_CHANNEL_ID, CHAT_CHANNEL_ID]:
-        if getattr(message, "webhook_id", None) and message.author and message.author.name:
-            mc_resolver.record_player(message.author.name)
-        if "whitelisted player" in raw_text.lower():
-            wl_m = re.search(r'whitelisted player\(s\):\s*([^\n\r]+)', raw_text, re.IGNORECASE)
-            if wl_m:
-                for n in re.sub(r'[\r\n`]+', '', wl_m.group(1)).split(','):
-                    if n.strip():
-                        mc_resolver.record_player(n.strip())
-
-    # ── CONSOLE CHANNEL: Intercept & Format 'whitelist list' output ───────────
-    if "whitelisted player" in raw_text.lower():
-        if message.channel.id == CONSOLE_CHANNEL_ID:
-            embed = format_whitelisted_players_embed(raw_text)
-            if embed:
-                try:
-                    await message.delete()
-                except Exception as de:
-                    logging.warning(f"[Whitelist Formatter] Could not delete raw message: {de}")
-                try:
-                    await message.channel.send(embed=embed)
-                except Exception as se:
-                    logging.error(f"[Whitelist Formatter] Error sending embed: {se}")
-                return
-
-    # Record chat activity for Minecraft Chat Drops
-    if not message.author.bot:
+    # Record member gaming presence
+    if not message.author.bot and isinstance(message.author, discord.Member):
         try:
-            import rewards_manager
-            rewards_manager.record_chat_activity(message.author.id)
+            player_analytics.record_presence(message.author)
         except Exception:
             pass
 
@@ -3466,55 +2642,12 @@ async def on_message(message: discord.Message):
             return
         return
 
-    # ── MINECRAFT GRIEFPREVENTION CLAIM LAND INTENT (Fast-Path) ───────────────
-    # Handles: "tillu give unlimited claim land to unique umar in minecraft", "give 5000 claim blocks to unique umar", "unique umar ko unlimited claim de do"
+    # ── MINECRAFT QUERY INTERCEPT ──────────────────────────────────────────────
     clean_action_text = re.sub(r'^(?:hey\s+)?(?:tillu|mr\.?\s*tillu)[,\s]*', '', message.content, flags=re.IGNORECASE).strip()
-    claim_match_1 = re.search(
-        r'(?:give|add|assign|grant|allocate|de\s+do)\s+(?:(unlimited|\d+)\s+)?(?:claim\s+(?:land|blocks?)|land\s+claims?|claims?|claimblocks)\s+to\s+([^\n\r]+)',
-        clean_action_text,
-        re.IGNORECASE
-    )
-    claim_match_2 = re.search(
-        r'([^\n\r]+?)\s+ko\s+(?:(unlimited|\d+)\s+)?(?:claim\s+(?:land|blocks?)|land\s+claims?|claims?|claimblocks)\s*(?:de\s+do|give|allocate|chahiye)?',
-        clean_action_text,
-        re.IGNORECASE
-    )
-    claim_match_3 = re.search(
-        r'(?:give|add|assign|grant|allocate|de\s+do)\s+([^\n\r]+?)\s+(?:(unlimited|\d+)\s+)?(?:claim\s+(?:land|blocks?)|land\s+claims?|claims?|claimblocks)',
-        clean_action_text,
-        re.IGNORECASE
-    )
-
-    claim_match = claim_match_1 or claim_match_2 or claim_match_3
-    if claim_match:
-        if claim_match == claim_match_1:
-            raw_amt = claim_match.group(1) or "unlimited"
-            raw_target = claim_match.group(2)
-        elif claim_match == claim_match_2:
-            raw_amt = claim_match.group(2) or "unlimited"
-            raw_target = claim_match.group(1)
-        else:
-            raw_amt = claim_match.group(2) or "unlimited"
-            raw_target = claim_match.group(1)
-
-        raw_target = re.sub(r'\b(in\s+minecraft|in\s+game|in\s+mc|minecraft|game)\b', '', raw_target, flags=re.IGNORECASE).strip()
-
-        if not is_privileged_user(message.author, message.guild):
-            await message.channel.send("🚫 Arre bhai, Minecraft me claim land ya bonus claim blocks allocate karne ki permission sirf Server Owner aur Admins ke paas hai! 🏰")
-            return
-
-        amount = 10000000 if raw_amt.lower() in ["unlimited", "infinite", "full", "sab", "max"] else int(re.sub(r'\D', '', raw_amt) or 10000000)
-
-        # Harvest players from DiscordSRV & console if needed
-        await mc_resolver.harvest_players_from_discord(bot, message.guild)
-        resolved_ign, conf = mc_resolver.resolve_closest_player(raw_target)
-        target_ign = resolved_ign or raw_target
-
-        ok, c_msg = await mc_resolver.execute_claim_land_command(target_ign, amount, execute_server_command)
-        amt_str = "unlimited (10,000,000)" if amount >= 10000000 else f"{amount:,}"
-        await message.channel.send(
-            f"🏰 **Done Boss!** Minecraft player `{target_ign}` ko **{amt_str} claim blocks** de diye gaye hain! Ab wo kitna bhi land claim kar sakta hai! ✨\n*(Dispatched to console <#{CONSOLE_CHANNEL_ID}> via GriefPrevention)*"
-        )
+    if any(w in clean_action_text.lower() for w in ["claim blocks", "claim land", "land claim", "give claim", "claimblocks"]):
+        await message.channel.send(mood_engine.format_mood_response(
+            "Arre bhai, Minecraft server permanently delete ho chuka hai! Ab koi claims ya blocks ki zaroorat nahi hai. Aalu YouTube streams par live game khelta hai! 📺🎮"
+        ))
         return
 
     # ── AUTONOMOUS DISCORD MANAGEMENT ACTIONS (Roles, Channels, Message Deletions, Timeouts) ──
@@ -3756,16 +2889,22 @@ async def on_interaction(interaction: discord.Interaction):
         await asyncio.sleep(0.05)
         if not interaction.response.is_done():
             custom_id = (interaction.data or {}).get("custom_id", "")
-            if "start" in custom_id:
-                await handle_start_request(interaction, user=interaction.user, guild=interaction.guild)
+            if "livetiming" in custom_id or "live" in custom_id:
+                await handle_livetiming_request(interaction)
+            elif "members" in custom_id:
+                await handle_members_request(interaction)
+            elif "games" in custom_id or "topgames" in custom_id:
+                await handle_topgames_request(interaction)
             elif "status" in custom_id:
                 await handle_status_request(interaction, user=interaction.user, guild=interaction.guild)
+            elif "start" in custom_id:
+                await handle_start_request(interaction, user=interaction.user, guild=interaction.guild)
             elif "whitelist" in custom_id:
-                await interaction.response.send_modal(WhitelistModal())
+                await handle_whitelist_request(interaction, "", user=interaction.user, guild=interaction.guild)
 
 # ── BACKGROUND KEEP-ALIVE HTTP SERVER & GUARDIAN ─────────────────────────────
 async def health_handler(request):
-    return web.Response(text=json.dumps({"status": "healthy", "service": "Tillu Minecraft Bot", "time": time.time()}), content_type="application/json")
+    return web.Response(text=json.dumps({"status": "healthy", "service": "Tillu Stream Co-Host Bot", "time": time.time()}), content_type="application/json")
 
 async def start_web_server():
     app = web.Application()
@@ -3797,18 +2936,21 @@ async def guardian_loop():
     await asyncio.sleep(10)
     while True:
         try:
-            is_up, _, p_count, _, _ = await asyncio.to_thread(ping_minecraft_server, 2.0)
-            if is_up:
-                activity = discord.Activity(type=discord.ActivityType.playing, name=f"Tillu | Minecraft ({p_count}/50)")
+            live_info = await asyncio.to_thread(youtube_tracker.check_youtube_live_status)
+            if live_info.get("is_live"):
+                title = live_info.get("title") or "Streaming Live!"
+                activity = discord.Activity(type=discord.ActivityType.streaming, name=f"🔴 LIVE: {title[:30]}", url=live_info.get("stream_url", "https://youtube.com/@AALU_CHIPAS"))
                 await bot.change_presence(status=discord.Status.online, activity=activity)
             else:
-                activity = discord.Activity(type=discord.ActivityType.listening, name="Tillu | legacy-7.hexacraft.fun")
-                await bot.change_presence(status=discord.Status.idle, activity=activity)
+                top = player_analytics.get_top_games()
+                top_name = top[0][0] if top else "Community"
+                activity = discord.Activity(type=discord.ActivityType.watching, name=f"@AALU_CHIPAS | {top_name}")
+                await bot.change_presence(status=discord.Status.online, activity=activity)
         except Exception:
             pass
-        await asyncio.sleep(1800)
+        await asyncio.sleep(300)
 
-# ── SCHEDULED BACKGROUND LOOPS (Automated 24h Backup & Live Sync) ───────────
+# ── SCHEDULED BACKGROUND LOOPS (Automated 24h Backup & Gaming Presence Sync) ───
 @tasks.loop(hours=24)
 async def scheduled_backup_loop():
     import backup_manager
@@ -3820,16 +2962,17 @@ async def scheduled_backup_loop():
         except Exception as ex:
             logging.error(f"[AutoBackup] Error on {g.name}: {ex}")
 
-@tasks.loop(hours=6)
+@tasks.loop(hours=1)
 async def scheduled_sync_loop():
-    import sync_manager
-    reg = load_whitelist_registry()
+    """Periodically snapshots gaming presence for all server members."""
     for g in bot.guilds:
         try:
-            c, a = await sync_manager.sync_guild_roles(g, reg)
-            logging.info(f"[AutoLiveSync] {g.name}: checked {c}, assigned {a} roles")
+            for member in g.members:
+                if not member.bot and member.activities:
+                    player_analytics.record_presence(member)
+            logging.info(f"[AutoPresenceSync] {g.name}: Synced member gaming presence.")
         except Exception as ex:
-            logging.error(f"[AutoLiveSync] Error on {g.name}: {ex}")
+            logging.error(f"[AutoPresenceSync] Error on {g.name}: {ex}")
 
 # ── 5x DAILY AUTONOMOUS SELF-REFLECTION LOOP (Every 4.8 Hours) ───────────────
 @tasks.loop(hours=4.8)
