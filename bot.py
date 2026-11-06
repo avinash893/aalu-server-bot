@@ -327,11 +327,15 @@ MINECRAFT SERVER STATUS (CLOSED & DELETED):
 
 COMMUNITY & BOT CAPABILITIES:
 1. YouTube Live Timing: You check if Aalu is live right now, upcoming scheduled stream times, countdowns, and direct stream links.
-2. Member Directory & Tagging: You know server members, search for members, and tag them properly using `<@user_id>` mentions when requested by staff or users.
-3. Controlling Other Bots: You have coordinator authority over other bots (Dyno, MEE6, Carl-bot, FredBoat, etc.). When Owner or Mods ask you to command another bot, emit:
+2. Voice AI Co-Host: You have native edge-TTS speech and voice channel capabilities. When anyone asks you to join VC or voice, you join natively! NEVER emit "BOT_COMMAND: !join" or summon another bot for voice/TTS!
+3. Member Directory & Tagging: You know server members, search for members, and tag them properly using `<@user_id>` mentions when requested by staff or users.
+4. Controlling Other Bots: You have coordinator authority over other bots (Dyno, MEE6, Carl-bot, FredBoat, etc.). When Owner or Mods ask you to command another bot, emit:
    BOT_COMMAND: <exact_prefixed_command>
-4. Player Game History & Daily Audit: You track what games community members play from public activity, report server gaming trends, and run 24-hour daily server & bot audits.
-5. Discord Server Management: Administrator moderation rights (purge, timeout, kick, ban, roles, channels) via DISCORD_INTENT for Owner/Admins.
+   (DO NOT use BOT_COMMAND for voice channel joining or TTS — you do that natively yourself!)
+5. Stream Prediction Economy: Viewers bet virtual Tillu Coins on stream clutches and predictions with pari-mutuel payouts.
+6. Viewer Leveling & Loyalty: You track chat activity and voice minutes with custom XP, levels, and badges.
+7. Player Game History & Daily Audit: You track what games community members play from public activity, report server gaming trends, and run 24-hour daily server & bot audits.
+8. Discord Server Management: Administrator moderation rights (purge, timeout, kick, ban, roles, channels) via DISCORD_INTENT for Owner/Admins.
 
 DYNAMIC HINGLISH PERSONALITY & SARCASM RULES:
 - You are NOT monotonous. Your tone shifts naturally between witty sarcasm, funny Desi memes, existential humor, and loyal brotherly support.
@@ -1742,6 +1746,15 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
         if match:
             bot_cmd = match.group(1).strip()
             clean_reply = re.sub(r'BOT_COMMAND:.*?\n?', '', answer).strip()
+            # Intercept accidental voice bot summoning and redirect to native Voice CoHost!
+            if bot_cmd.lower() in ("!join", "/join", "!connect", "-join", ".join"):
+                if getattr(user, "voice", None) and user.voice.channel:
+                    await voice_cohost.join_channel(user.voice.channel)
+                    await reply_fn(content=f"🎙️ **Tillu VC Connected!** Main **{user.voice.channel.name}** me aa gaya hoon Boss! (Apna native voice system use kar raha hoon!)")
+                    return
+                else:
+                    await reply_fn(content="❌ Pehle kisi voice channel me connect ho jao Sarkar, fir mujhe bulao!")
+                    return
             if is_admin:
                 if hasattr(interaction_or_ctx, "channel") and interaction_or_ctx.channel:
                     await interaction_or_ctx.channel.send(bot_cmd)
@@ -3375,6 +3388,80 @@ async def on_message(message: discord.Message):
     )
     if is_standalone_players_cmd:
         await handle_players_command(message.channel, message.author)
+        return
+
+    # ── NATURAL LANGUAGE VOICE CO-HOST INTENTS ──────────────────────────────
+    is_vc_join = bool(re.search(
+        r'(?:\bjoin\b.*?\b(?:vc|voice|call)\b|\b(?:vc|voice|call)\b.*?\b(?:join|aao|aa\s*jao|connect)\b)',
+        clean_q,
+        re.IGNORECASE
+    ))
+    if is_vc_join:
+        if not getattr(message.author, "voice", None) or not message.author.voice.channel:
+            opener = meme_engine.get_fresh_opener()
+            await message.channel.send(f"❌ {opener} Pehle kisi voice channel me connect ho jao Sarkar, fir bulao!")
+            return
+        target_vc = message.author.voice.channel
+        ok, status_msg, _ = await voice_cohost.join_channel(target_vc)
+        opener = meme_engine.get_fresh_opener()
+        memes = meme_engine.pick_fresh_memes("funny", count=1)
+        meme_quote = f" ({memes[0]['text']})" if memes else ""
+        await message.channel.send(f"🎙️ **Tillu VC Connected!** {opener} Main **{target_vc.name}** me aa gaya hoon Boss!{meme_quote}\n*(Commands: `!speak <text>`, `!vcroast`, `!vchype`, `!leavevc`)*")
+        try:
+            await voice_cohost.speak_text(message.guild, f"Pranam Boss! Tillu voice channel me haazir hai!")
+        except Exception as ve:
+            logging.debug(f"[AutoSpeak Error] {ve}")
+        return
+
+    is_vc_leave = bool(re.search(
+        r'(?:\bleave\b.*?\b(?:vc|voice|call)\b|\b(?:vc|voice|call)\b.*?\b(?:leave|niklo|disconnect|chhod\s*do|bahaar\s*niklo)\b|\bdisconnect\s*(?:from\s*)?(?:vc|voice)\b)',
+        clean_q,
+        re.IGNORECASE
+    ))
+    if is_vc_leave:
+        ok, status_msg = await voice_cohost.leave_channel(message.guild)
+        await message.channel.send(f"🎙️ {status_msg}")
+        return
+
+    is_vc_roast = bool(re.search(
+        r'\b(?:vc\s*roast|roast\s*in\s*vc|vc\s*me\s*roast)\b',
+        clean_q,
+        re.IGNORECASE
+    ))
+    if is_vc_roast:
+        if not message.guild.voice_client:
+            await message.channel.send("❌ Main voice channel me nahi hoon! Pehle `tillu join vc` bolo.")
+            return
+        target_user = message.mentions[0].display_name if message.mentions else message.author.display_name
+        ok, msg, script = await voice_cohost.speak_roast(message.guild, target_user)
+        await message.channel.send(f"🔥 **Tillu VC Roast ({target_user}):**\n> *\"{script}\"*")
+        return
+
+    is_vc_hype = bool(re.search(
+        r'\b(?:vc\s*hype|hype\s*in\s*vc|clutch\s*hype)\b',
+        clean_q,
+        re.IGNORECASE
+    ))
+    if is_vc_hype:
+        if not message.guild.voice_client:
+            await message.channel.send("❌ Main voice channel me nahi hoon! Pehle `tillu join vc` bolo.")
+            return
+        ok, msg, script = await voice_cohost.speak_hype(message.guild, streamer_name="Aalu")
+        await message.channel.send(f"⚡ **Stream Clutch Hype:**\n> *\"{script}\"*")
+        return
+
+    speak_match = re.search(
+        r'(?:vc\s*me\s*bol(?:o)?|speak\s*in\s*vc|bol\s*vc\s*me)\s*[:\-]?\s*(.+)',
+        clean_q,
+        re.IGNORECASE
+    )
+    if speak_match:
+        to_speak = speak_match.group(1).strip()
+        if not message.guild.voice_client:
+            await message.channel.send("❌ Main voice channel me nahi hoon! Pehle `tillu join vc` bolo.")
+            return
+        ok, msg = await voice_cohost.speak_text(message.guild, to_speak)
+        await message.channel.send(f"🎙️ **Tillu:** {msg}\n> *\"{to_speak}\"*")
         return
 
     try:
