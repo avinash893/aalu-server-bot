@@ -19,6 +19,7 @@ import asyncio
 import base64
 import threading
 from typing import Dict, Any, List, Optional
+import discord
 import requests
 
 logger = logging.getLogger("TilluSelfReflection")

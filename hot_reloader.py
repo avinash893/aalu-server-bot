@@ -30,6 +30,9 @@ RELOADABLE_MODULES = [
     "backup_manager",
     "sync_manager",
     "self_reflection",
+    "voice_cohost",
+    "stream_prediction",
+    "loyalty_system",
 ]
 
 class HotReloader:

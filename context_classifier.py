@@ -229,7 +229,7 @@ def classify_intent(
         )
 
     # ROLES & CHANNELS:
-    if any(k in q_lower for k in ["create role", "give role", "remove role", "delete role", "create channel", "lock channel", "unlock channel"]):
+    if any(k in q_lower for k in ["create role", "give role", "remove role", "delete role", "create channel", "create voice channel", "create text channel", "lock channel", "unlock channel"]):
         return ClassificationResult(
             system=TargetSystem.DISCORD,
             action="discord_admin_action",

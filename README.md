@@ -6,6 +6,9 @@ Tillu is an autonomous Hinglish AI co-host and Discord community manager built f
 
 ## Features
 
+- Voice Channel AI Co-Host: Joins Discord voice channels to speak live roasts, clutch commentary, and banter using natural Indian TTS.
+- Stream Prediction and Betting Economy: Allows viewers to bet virtual Tillu Coins on stream clutches and match predictions with pari-mutuel payouts.
+- Viewer Leveling and Loyalty Badges: Rewards active stream watchers and Discord members with XP, levels, rank progress cards, and loyalty badges.
 - Dynamic Personality Engine: Switches dynamically between Sarcastic, Funny, Sad Sarcastic, Wholesome, and Savage tones.
 - 130+ Meme & Anti-Repetition Vault: Over 130 Bollywood, Desi OTT, gaming, and Gen-Z memes with active anti-phrase loop protection so Tillu never repeats identical starters.
 - YouTube Live Tracking: Real-time stream timings and live broadcast detection via the YouTube Data API.
@@ -21,6 +24,20 @@ Tillu is an autonomous Hinglish AI co-host and Discord community manager built f
 
 | Command | Description | Permission |
 | :--- | :--- | :--- |
+| `/joinvc` | Connects Tillu to your voice channel as AI stream co-host | Everyone |
+| `/leavevc` | Disconnects Tillu from the voice channel | Everyone |
+| `/speak <text>` | Makes Tillu speak custom text out loud in VC | Everyone |
+| `/vcroast [user]` | Roasts a member out loud in voice channel using memes | Everyone |
+| `/vchype` | Triggers live stream clutch hype commentary in voice channel | Everyone |
+| `/predict <q> <opt_a> <opt_b> [mins]` | Starts a stream prediction event with coin betting | Everyone |
+| `/bet <pred_id> <option> <amount>` | Bets Tillu coins on an active prediction | Everyone |
+| `/resolveprediction <pred_id> <winner>` | Resolves a prediction and distributes winnings | Admin / Mod |
+| `/predictions` | Views active stream predictions and prize pools | Everyone |
+| `/coins [@user]` | Checks wallet balance and betting stats | Everyone |
+| `/dailycoins` | Claims daily 250 bonus coins | Everyone |
+| `/coinboard` | Shows leaderboard of richest coin holders | Everyone |
+| `/rank [@user]` | Displays viewer level, XP, badges, and progress | Everyone |
+| `/topviewers` | Shows leaderboard of most active chat and voice members | Everyone |
 | `/livetiming` | Checks YouTube live stream timings and status for @AALU_CHIPAS | Everyone |
 | `/members [role]` | Lists community members with an optional role filter | Everyone |
 | `/tagmember <name>` | Finds a member by name/query and mentions them | Everyone |

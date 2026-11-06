@@ -17,7 +17,7 @@ import asyncio
 import re
 import base64
 import threading
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import discord
 import requests
 

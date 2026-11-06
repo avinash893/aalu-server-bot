@@ -183,6 +183,9 @@ from mood_engine import MoodEngine, TilluMood
 from player_analytics import PlayerAnalytics
 from member_directory import MemberDirectory
 from meme_engine import meme_engine, MemeEngine
+from voice_cohost import voice_cohost, VoiceCoHost
+from stream_prediction import prediction_economy, PredictionEconomy
+from loyalty_system import loyalty_system, LoyaltySystem
 
 hot_reloader = HotReloader()
 youtube_tracker = YouTubeTracker()
@@ -2125,6 +2128,218 @@ async def slash_audit(interaction: discord.Interaction):
     else:
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+# ── VOICE CHANNEL AI CO-HOST SLASH COMMANDS ──────────────────────────────────
+@bot.tree.command(name="joinvc", description="Make Tillu join your voice channel as AI stream co-host")
+async def slash_joinvc(interaction: discord.Interaction):
+    if not interaction.user or not getattr(interaction.user, "voice", None) or not interaction.user.voice.channel:
+        return await safe_send_interaction(interaction, "❌ Pehle kisi voice channel me connect ho jao!", ephemeral=True)
+    ch = interaction.user.voice.channel
+    await interaction.response.defer(ephemeral=False)
+    ok, msg, _ = await voice_cohost.join_channel(ch)
+    embed = discord.Embed(
+        title="🎙️ Tillu Voice Co-Host Connected",
+        description=msg,
+        color=0x2ECC71 if ok else 0xE74C3C
+    )
+    embed.set_footer(text="Use /speak, /vcroast, or /vchype to make Tillu speak live!")
+    await interaction.followup.send(embed=embed)
+
+@bot.tree.command(name="leavevc", description="Disconnect Tillu from the voice channel")
+async def slash_leavevc(interaction: discord.Interaction):
+    ok, msg = await voice_cohost.leave_channel(interaction.guild)
+    await safe_send_interaction(interaction, f"🎙️ {msg}", ephemeral=not ok)
+
+@bot.tree.command(name="speak", description="Make Tillu speak custom text in your voice channel")
+@app_commands.describe(text="What should Tillu speak out loud in Hinglish/Hindi?")
+async def slash_speak(interaction: discord.Interaction, text: str):
+    if not interaction.guild.voice_client:
+        return await safe_send_interaction(interaction, "❌ Tillu voice channel me nahi hai! Pehle `/joinvc` use karo.", ephemeral=True)
+    await interaction.response.defer(ephemeral=False)
+    ok, msg = await voice_cohost.speak_text(interaction.guild, text)
+    await interaction.followup.send(f"🎙️ **Tillu:** {msg}\n> *\"{text}\"*")
+
+@bot.tree.command(name="vcroast", description="Tillu roasts someone out loud in VC using savage Hinglish memes")
+@app_commands.describe(user="The member to roast live in VC")
+async def slash_vcroast(interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    if not interaction.guild.voice_client:
+        return await safe_send_interaction(interaction, "❌ Tillu voice channel me nahi hai! Pehle `/joinvc` use karo.", ephemeral=True)
+    target_name = user.display_name if user else interaction.user.display_name
+    await interaction.response.defer(ephemeral=False)
+    ok, msg, script = await voice_cohost.speak_roast(interaction.guild, target_name)
+    await interaction.followup.send(f"🔥 **Tillu VC Roast ({target_name}):**\n> *\"{script}\"*")
+
+@bot.tree.command(name="vchype", description="Tillu triggers live clutch stream hype commentary in VC")
+async def slash_vchype(interaction: discord.Interaction):
+    if not interaction.guild.voice_client:
+        return await safe_send_interaction(interaction, "❌ Tillu voice channel me nahi hai! Pehle `/joinvc` use karo.", ephemeral=True)
+    await interaction.response.defer(ephemeral=False)
+    ok, msg, script = await voice_cohost.speak_hype(interaction.guild, streamer_name="Aalu")
+    await interaction.followup.send(f"⚡ **Stream Clutch Hype:**\n> *\"{script}\"*")
+
+# ── STREAM PREDICTION & ECONOMY SLASH COMMANDS ───────────────────────────────
+@bot.tree.command(name="predict", description="Create a stream prediction event for viewers to bet Tillu coins")
+@app_commands.describe(question="Match or clutch question", option_a="Option A outcome", option_b="Option B outcome", minutes="Betting window in minutes (1-60)")
+async def slash_predict(interaction: discord.Interaction, question: str, option_a: str, option_b: str, minutes: Optional[int] = 5):
+    dur = max(1, min(60, minutes or 5))
+    pred = prediction_economy.create_prediction(
+        guild_id=interaction.guild.id,
+        question=question,
+        option_a=option_a,
+        option_b=option_b,
+        duration_minutes=dur,
+        creator_name=interaction.user.display_name
+    )
+    embed = discord.Embed(
+        title=f"🎲 Stream Prediction: {question}",
+        description=(
+            f"**Prediction ID:** `{pred['id']}`\n\n"
+            f"🅰️ **Option A:** `{option_a}`\n"
+            f"🅱️ **Option B:** `{option_b}`\n\n"
+            f"⏱️ **Betting Closes:** <t:{int(pred['ends_at'])}:R>\n"
+            f"👉 Bet coins: `/bet prediction_id:{pred['id']} option:A amount:100`"
+        ),
+        color=0xF1C40F
+    )
+    embed.set_footer(text=f"Created by {interaction.user.display_name} • Pari-mutuel prize pool")
+    await safe_send_interaction(interaction, embed=embed)
+
+@bot.tree.command(name="bet", description="Bet Tillu coins on an active stream prediction")
+@app_commands.describe(prediction_id="The prediction ID", option="Choose A or B", amount="Coins to bet")
+async def slash_bet(interaction: discord.Interaction, prediction_id: str, option: str, amount: int):
+    ok, msg, res = prediction_economy.place_bet(
+        user_id=interaction.user.id,
+        prediction_id=prediction_id,
+        option_choice=option,
+        amount=amount,
+        user_name=interaction.user.display_name
+    )
+    if not ok:
+        return await safe_send_interaction(interaction, f"❌ {msg}", ephemeral=True)
+    embed = discord.Embed(
+        title="🪙 Bet Placed Successfully!",
+        description=(
+            f"**Member:** {interaction.user.mention}\n"
+            f"**Prediction:** `{res.get('question', '')}`\n"
+            f"**Choice:** `{res.get('chosen_label', option.upper())}`\n"
+            f"**Amount Bet:** `{amount:,}` coins\n"
+            f"💰 **Remaining Balance:** `{res.get('remaining_balance', 0):,}` coins"
+        ),
+        color=0x2ECC71
+    )
+    await safe_send_interaction(interaction, embed=embed)
+
+@bot.tree.command(name="resolveprediction", description="Resolve a prediction and distribute coins (Owner/Admins only)")
+@app_commands.describe(prediction_id="The prediction ID", winning_option="Winning option: A, B, or CANCEL")
+async def slash_resolveprediction(interaction: discord.Interaction, prediction_id: str, winning_option: str):
+    if not is_privileged_user(interaction.user, interaction.guild):
+        return await safe_send_interaction(interaction, "🚫 Sirf Server Owner ya Admins prediction resolve kar sakte hain!", ephemeral=True)
+    ok, msg, res = prediction_economy.resolve_prediction(prediction_id, winning_option)
+    if not ok:
+        return await safe_send_interaction(interaction, f"❌ {msg}", ephemeral=True)
+    embed = discord.Embed(
+        title="🏆 Stream Prediction Resolved!",
+        description=(
+            f"**Question:** `{res.get('question')}`\n"
+            f"**Winner:** `{res.get('winning_label', winning_option.upper())}`\n"
+            f"💰 **Total Prize Pool:** `{res.get('total_pool', 0):,}` coins\n"
+            f"👥 **Winners Paid:** `{res.get('payouts_count', 0)}` members"
+        ),
+        color=0xF39C12
+    )
+    await safe_send_interaction(interaction, embed=embed)
+
+@bot.tree.command(name="predictions", description="View active stream predictions")
+async def slash_predictions(interaction: discord.Interaction):
+    active = prediction_economy.get_active_predictions(interaction.guild.id)
+    if not active:
+        return await safe_send_interaction(interaction, "Abhi koi active prediction nahi chal rahi! `/predict` karke shuru karo.", ephemeral=True)
+    embed = discord.Embed(title="🎲 Active Stream Predictions", color=0x3498DB)
+    for p in active[:5]:
+        status = "🟢 OPEN" if p.get("status") == "OPEN" else "🔒 CLOSED"
+        pool = p.get("pool_a", 0) + p.get("pool_b", 0)
+        embed.add_field(
+            name=f"`{p['id']}`: {p['question']} ({status})",
+            value=f"• **[A]** {p['option_a']}: `{p.get('pool_a', 0):,}` coins\n• **[B]** {p['option_b']}: `{p.get('pool_b', 0):,}` coins\n• **Total Pool:** `{pool:,}` coins | Closes: <t:{int(p['ends_at'])}:R>",
+            inline=False
+        )
+    await safe_send_interaction(interaction, embed=embed)
+
+@bot.tree.command(name="coins", description="Check your or another member's Tillu Coin wallet")
+@app_commands.describe(user="The member whose balance to check")
+async def slash_coins(interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    target = user or interaction.user
+    w = prediction_economy.get_wallet(target.id, target.display_name)
+    embed = discord.Embed(
+        title=f"🪙 {target.display_name}'s Coin Wallet",
+        color=0xF1C40F
+    )
+    embed.add_field(name="Current Balance", value=f"**{w.get('coins', 0):,}** coins", inline=True)
+    embed.add_field(name="Total Won", value=f"**{w.get('total_won', 0):,}** coins", inline=True)
+    embed.add_field(name="Total Bet", value=f"**{w.get('total_bet', 0):,}** coins", inline=True)
+    embed.set_footer(text="Claim free daily bonus coins with /dailycoins!")
+    await safe_send_interaction(interaction, embed=embed)
+
+@bot.tree.command(name="dailycoins", description="Claim daily 250 free bonus Tillu Coins")
+async def slash_dailycoins(interaction: discord.Interaction):
+    ok, msg, bal = prediction_economy.claim_daily(interaction.user.id, interaction.user.display_name)
+    if ok:
+        await safe_send_interaction(interaction, f"🎁 {msg}\n💰 Naya balance: **{bal:,}** coins!")
+    else:
+        await safe_send_interaction(interaction, f"⏳ {msg}", ephemeral=True)
+
+@bot.tree.command(name="coinboard", description="Leaderboard of top coin holders in the server")
+async def slash_coinboard(interaction: discord.Interaction):
+    lb = prediction_economy.get_leaderboard(limit=10)
+    if not lb:
+        return await safe_send_interaction(interaction, "Abhi leaderboard par koi data nahi hai!", ephemeral=True)
+    lines = []
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (name, coins, won) in enumerate(lb):
+        medal = medals[i] if i < 3 else f"`#{i+1}`"
+        lines.append(f"{medal} **{name}** — `{coins:,}` coins *(Won: {won:,})*")
+    embed = discord.Embed(
+        title="🏆 Tillu Coin Leaderboard — High Rollers",
+        description="\n".join(lines),
+        color=0xF1C40F
+    )
+    await safe_send_interaction(interaction, embed=embed)
+
+# ── VIEWER LEVELING & LOYALTY SLASH COMMANDS ─────────────────────────────────
+@bot.tree.command(name="rank", description="Check your or another member's stream viewer level, XP, and badges")
+@app_commands.describe(user="The member whose rank to view")
+async def slash_rank(interaction: discord.Interaction, user: Optional[discord.Member] = None):
+    target = user or interaction.user
+    card = loyalty_system.format_rank_card(target.id, target.display_name)
+    embed = discord.Embed(
+        title=f"🎖️ {target.display_name}'s Viewer Rank",
+        description=f"**Title:** `{card['title']}`\n**Level:** `{card['level']}`\n\n**XP Progress:** `{card['xp']:,}` XP\n`{card['progress_bar']}` `{card['progress_percent']:.1f}%`\n*(+{card['xp_needed'] - card['xp_gained']:,} XP to Level {card['level']+1})*",
+        color=0x9B59B6
+    )
+    embed.add_field(name="Chat Messages", value=f"`{card['messages']:,}`", inline=True)
+    embed.add_field(name="Voice Time", value=f"`{card['voice_hours']:.1f} hrs`", inline=True)
+    badge_str = " ".join([f"{b['emoji']} **{b['name']}**" for b in card['badges']]) if card['badges'] else "*None unlocked yet*"
+    embed.add_field(name="Unlocked Badges", value=badge_str, inline=False)
+    await safe_send_interaction(interaction, embed=embed)
+
+@bot.tree.command(name="topviewers", description="Leaderboard of most active stream viewers and chatters")
+async def slash_topviewers(interaction: discord.Interaction):
+    top = loyalty_system.get_top_viewers(limit=10)
+    if not top:
+        return await safe_send_interaction(interaction, "Abhi top viewers par koi data nahi hai!", ephemeral=True)
+    lines = []
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (name, lvl, xp, badge_emojis) in enumerate(top):
+        m = medals[i] if i < 3 else f"`#{i+1}`"
+        b_str = " " + "".join(badge_emojis) if badge_emojis else ""
+        lines.append(f"{m} **{name}**{b_str} — **Level {lvl}** (`{xp:,}` XP)")
+    embed = discord.Embed(
+        title="🌟 Top Community Viewers & Chatters",
+        description="\n".join(lines),
+        color=0xE67E22
+    )
+    embed.set_footer(text="Earn XP by chatting in Discord and hanging out in Voice Channels!")
+    await safe_send_interaction(interaction, embed=embed)
+
 @bot.tree.command(name="help", description="Show Tillu bot commands & features")
 async def slash_help(interaction: discord.Interaction):
     embed = discord.Embed(
@@ -2133,13 +2348,15 @@ async def slash_help(interaction: discord.Interaction):
         color=0x9B59B6
     )
     embed.add_field(name="💬 Chat Naturally", value="Just type `tillu <question>` or `@Tillu <question>` anywhere in chat!", inline=False)
+    embed.add_field(name="🎙️ Voice AI Co-Host", value="`/joinvc`, `/leavevc`, `/speak <text>`, `/vcroast [user]`, `/vchype`", inline=False)
+    embed.add_field(name="🎲 Predictions & Coins", value="`/predict`, `/bet`, `/predictions`, `/coins`, `/dailycoins`, `/coinboard`", inline=False)
+    embed.add_field(name="🎖️ Leveling & Badges", value="`/rank [@user]`, `/topviewers` — Earn XP by chatting and voice hangout", inline=False)
     embed.add_field(name="📺 YouTube Live Timings", value="`/livetiming` or `!livetiming` — Live stream updates for @AALU_CHIPAS", inline=False)
     embed.add_field(name="👥 Member Directory", value="`/members [role]` and `/tagmember <name>` to find & tag anyone!", inline=False)
     embed.add_field(name="🎮 Game Analytics", value="`/gamehistory [@user]` and `/topgames` to track gaming history", inline=False)
     embed.add_field(name="🤖 Inter-Bot Power", value="`/usebot <command>` or `tillu tell <bot> to <action>` to command other bots", inline=False)
-    embed.add_field(name="🎭 Dynamic Mood", value="`/mood` to check Tillu's mood (Sarcastic, Funny, Sad Sarcastic, Wholesome)", inline=False)
+    embed.add_field(name="🎭 Dynamic Mood & Memes", value="`/mood` and `/meme [category]` from Tillu's 130+ meme vault", inline=False)
     embed.add_field(name="🧠 Teach & Remember", value="`tillu yaad rakh <baat>` or `/remember <fact>`", inline=False)
-    embed.add_field(name="📖 View Memories", value="`/memories` to see learned knowledge", inline=False)
     embed.add_field(name="🔍 Daily Self-Audit", value="`/audit` to trigger Tillu's autonomous self-reflection & bot discovery", inline=False)
     embed.set_footer(text="Tillu • 24/7 Always-Online Co-Host")
     await safe_send_interaction(interaction, embed=embed, view=CommunityView(), ephemeral=True)
@@ -2430,6 +2647,204 @@ async def cmd_status(ctx):
 async def cmd_whitelist(ctx, *, ign: str = None):
     await handle_whitelist_request(ctx, ign, user=ctx.author, guild=ctx.guild)
 
+# ── VOICE CHANNEL AI CO-HOST PREFIX COMMANDS ─────────────────────────────────
+@bot.command(name="joinvc", aliases=["connectvc", "vcin"])
+async def cmd_joinvc(ctx):
+    if not ctx.author.voice or not ctx.author.voice.channel:
+        return await ctx.send("❌ Pehle kisi voice channel me connect ho jao!")
+    ok, msg, _ = await voice_cohost.join_channel(ctx.author.voice.channel)
+    await ctx.send(f"🎙️ {msg}")
+
+@bot.command(name="leavevc", aliases=["disconnectvc", "vcout"])
+async def cmd_leavevc(ctx):
+    ok, msg = await voice_cohost.leave_channel(ctx.guild)
+    await ctx.send(f"🎙️ {msg}")
+
+@bot.command(name="speak", aliases=["sayvc", "vcsay"])
+async def cmd_speak(ctx, *, text: str = None):
+    if not text:
+        return await ctx.send("❌ Usage: `!speak <text>`")
+    if not ctx.guild.voice_client:
+        return await ctx.send("❌ Tillu voice channel me nahi hai! Pehle `!joinvc` karo.")
+    ok, msg = await voice_cohost.speak_text(ctx.guild, text)
+    await ctx.send(f"🎙️ {msg}")
+
+@bot.command(name="vcroast", aliases=["roastvc"])
+async def cmd_vcroast(ctx, *, target: str = None):
+    if not ctx.guild.voice_client:
+        return await ctx.send("❌ Tillu voice channel me nahi hai! Pehle `!joinvc` karo.")
+    target_name = target or ctx.author.display_name
+    ok, msg, script = await voice_cohost.speak_roast(ctx.guild, target_name)
+    await ctx.send(f"🔥 **Tillu VC Roast ({target_name}):**\n> *\"{script}\"*")
+
+@bot.command(name="vchype", aliases=["hypevc"])
+async def cmd_vchype(ctx):
+    if not ctx.guild.voice_client:
+        return await ctx.send("❌ Tillu voice channel me nahi hai! Pehle `!joinvc` karo.")
+    ok, msg, script = await voice_cohost.speak_hype(ctx.guild, streamer_name="Aalu")
+    await ctx.send(f"⚡ **Stream Clutch Hype:**\n> *\"{script}\"*")
+
+# ── STREAM PREDICTION & ECONOMY PREFIX COMMANDS ──────────────────────────────
+@bot.command(name="predict", aliases=["newpred"])
+async def cmd_predict(ctx, *, args: str = None):
+    """Create a stream prediction. Format: !predict Question | Option A | Option B [| minutes]"""
+    if not args:
+        return await ctx.send("❌ Usage: `!predict <Question> | <Option A> | <Option B> [| minutes]`")
+    parts = [p.strip() for p in args.split("|")]
+    if len(parts) < 3:
+        return await ctx.send("❌ Usage: `!predict <Question> | <Option A> | <Option B> [| minutes]`")
+    question = parts[0]
+    opt_a = parts[1]
+    opt_b = parts[2]
+    minutes = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 5
+    pred = prediction_economy.create_prediction(
+        guild_id=ctx.guild.id,
+        question=question,
+        option_a=opt_a,
+        option_b=opt_b,
+        duration_minutes=minutes,
+        creator_name=ctx.author.display_name
+    )
+    embed = discord.Embed(
+        title=f"🎲 Stream Prediction: {question}",
+        description=(
+            f"**ID:** `{pred['id']}`\n\n"
+            f"🅰️ **Option A:** `{opt_a}`\n"
+            f"🅱️ **Option B:** `{opt_b}`\n\n"
+            f"⏱️ **Betting Closes:** <t:{int(pred['ends_at'])}:R>\n"
+            f"👉 Bet: `!bet {pred['id']} A 100`"
+        ),
+        color=0xF1C40F
+    )
+    embed.set_footer(text=f"Created by {ctx.author.display_name}")
+    await ctx.send(embed=embed)
+
+@bot.command(name="bet")
+async def cmd_bet(ctx, prediction_id: str = None, option: str = None, amount: int = None):
+    if not prediction_id or not option or amount is None:
+        return await ctx.send("❌ Usage: `!bet <prediction_id> <A|B> <amount>`")
+    ok, msg, res = prediction_economy.place_bet(
+        user_id=ctx.author.id,
+        prediction_id=prediction_id,
+        option_choice=option,
+        amount=amount,
+        user_name=ctx.author.display_name
+    )
+    if not ok:
+        return await ctx.send(f"❌ {msg}")
+    await ctx.send(f"🪙 **Bet Placed!** `{amount:,}` coins on `{res.get('chosen_label', option.upper())}` for prediction `{prediction_id}`! (Remaining: `{res.get('remaining_balance', 0):,}` coins)")
+
+@bot.command(name="resolvepred", aliases=["resolveprediction", "endpred"])
+async def cmd_resolvepred(ctx, prediction_id: str = None, winning_option: str = None):
+    if not is_privileged_user(ctx.author, ctx.guild):
+        return await ctx.send("🚫 Sirf Server Owner ya Admins prediction resolve kar sakte hain!")
+    if not prediction_id or not winning_option:
+        return await ctx.send("❌ Usage: `!resolvepred <prediction_id> <A|B|CANCEL>`")
+    ok, msg, res = prediction_economy.resolve_prediction(prediction_id, winning_option)
+    if not ok:
+        return await ctx.send(f"❌ {msg}")
+    embed = discord.Embed(
+        title="🏆 Stream Prediction Resolved!",
+        description=(
+            f"**Question:** `{res.get('question')}`\n"
+            f"**Winner:** `{res.get('winning_label', winning_option.upper())}`\n"
+            f"💰 **Total Prize Pool:** `{res.get('total_pool', 0):,}` coins\n"
+            f"👥 **Winners Paid:** `{res.get('payouts_count', 0)}` members"
+        ),
+        color=0xF39C12
+    )
+    await ctx.send(embed=embed)
+
+@bot.command(name="predictions", aliases=["activepredictions", "preds", "bets"])
+async def cmd_predictions(ctx):
+    active = prediction_economy.get_active_predictions(ctx.guild.id)
+    if not active:
+        return await ctx.send("Abhi koi active stream prediction nahi chal rahi! `!predict` use karke create karo.")
+    embed = discord.Embed(title="🎲 Active Stream Predictions", color=0x3498DB)
+    for p in active[:5]:
+        status = "🟢 OPEN" if p.get("status") == "OPEN" else "🔒 CLOSED"
+        pool = p.get("pool_a", 0) + p.get("pool_b", 0)
+        embed.add_field(
+            name=f"`{p['id']}`: {p['question']} ({status})",
+            value=f"• **[A]** {p['option_a']}: `{p.get('pool_a', 0):,}` coins\n• **[B]** {p['option_b']}: `{p.get('pool_b', 0):,}` coins\n• **Pool:** `{pool:,}` coins | Closes: <t:{int(p['ends_at'])}:R>",
+            inline=False
+        )
+    await ctx.send(embed=embed)
+
+@bot.command(name="coins", aliases=["bal", "balance", "wallet"])
+async def cmd_coins(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    w = prediction_economy.get_wallet(target.id, target.display_name)
+    embed = discord.Embed(
+        title=f"🪙 {target.display_name}'s Coin Wallet",
+        color=0xF1C40F
+    )
+    embed.add_field(name="Current Balance", value=f"**{w.get('coins', 0):,}** coins", inline=True)
+    embed.add_field(name="Total Won", value=f"**{w.get('total_won', 0):,}** coins", inline=True)
+    embed.add_field(name="Total Bet", value=f"**{w.get('total_bet', 0):,}** coins", inline=True)
+    embed.set_footer(text="Claim free daily bonus coins with !dailycoins!")
+    await ctx.send(embed=embed)
+
+@bot.command(name="dailycoins", aliases=["daily"])
+async def cmd_dailycoins(ctx):
+    ok, msg, bal = prediction_economy.claim_daily(ctx.author.id, ctx.author.display_name)
+    if ok:
+        await ctx.send(f"🎁 {msg}\n💰 Naya balance: **{bal:,}** coins!")
+    else:
+        await ctx.send(f"⏳ {msg}")
+
+@bot.command(name="coinboard", aliases=["rich", "topcoins"])
+async def cmd_coinboard(ctx):
+    lb = prediction_economy.get_leaderboard(limit=10)
+    if not lb:
+        return await ctx.send("Abhi leaderboard par koi data nahi hai!")
+    lines = []
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (name, coins, won) in enumerate(lb):
+        m = medals[i] if i < 3 else f"`#{i+1}`"
+        lines.append(f"{m} **{name}** — `{coins:,}` coins *(Won: {won:,})*")
+    embed = discord.Embed(
+        title="🏆 Tillu Coin Leaderboard — High Rollers",
+        description="\n".join(lines),
+        color=0xF1C40F
+    )
+    await ctx.send(embed=embed)
+
+# ── VIEWER LEVELING & LOYALTY PREFIX COMMANDS ────────────────────────────────
+@bot.command(name="rank", aliases=["level", "xp", "lvl"])
+async def cmd_rank(ctx, member: discord.Member = None):
+    target = member or ctx.author
+    card = loyalty_system.format_rank_card(target.id, target.display_name)
+    embed = discord.Embed(
+        title=f"🎖️ {target.display_name}'s Viewer Rank",
+        description=f"**Title:** `{card['title']}`\n**Level:** `{card['level']}`\n\n**XP Progress:** `{card['xp']:,}` XP\n`{card['progress_bar']}` `{card['progress_percent']:.1f}%`\n*(+{card['xp_needed'] - card['xp_gained']:,} XP to Level {card['level']+1})*",
+        color=0x9B59B6
+    )
+    embed.add_field(name="Chat Messages", value=f"`{card['messages']:,}`", inline=True)
+    embed.add_field(name="Voice Time", value=f"`{card['voice_hours']:.1f} hrs`", inline=True)
+    badge_str = " ".join([f"{b['emoji']} **{b['name']}**" for b in card['badges']]) if card['badges'] else "*None unlocked yet*"
+    embed.add_field(name="Unlocked Badges", value=badge_str, inline=False)
+    await ctx.send(embed=embed)
+
+@bot.command(name="topviewers", aliases=["leaderboard", "topchatters"])
+async def cmd_topviewers(ctx):
+    top = loyalty_system.get_top_viewers(limit=10)
+    if not top:
+        return await ctx.send("Abhi top viewers par koi data nahi hai!")
+    lines = []
+    medals = ["🥇", "🥈", "🥉"]
+    for i, (name, lvl, xp, badge_emojis) in enumerate(top):
+        m = medals[i] if i < 3 else f"`#{i+1}`"
+        b_str = " " + "".join(badge_emojis) if badge_emojis else ""
+        lines.append(f"{m} **{name}**{b_str} — **Level {lvl}** (`{xp:,}` XP)")
+    embed = discord.Embed(
+        title="🌟 Top Community Viewers & Chatters",
+        description="\n".join(lines),
+        color=0xE67E22
+    )
+    embed.set_footer(text="Earn XP by chatting in Discord and hanging out in Voice Channels!")
+    await ctx.send(embed=embed)
+
 @bot.command(name="help")
 async def cmd_help(ctx):
     embed = discord.Embed(
@@ -2438,11 +2853,14 @@ async def cmd_help(ctx):
         color=0x9B59B6
     )
     embed.add_field(name="💬 Chat Naturally", value="Just type `tillu <question>` or `@Tillu <question>` anywhere in chat!", inline=False)
+    embed.add_field(name="🎙️ Voice AI Co-Host", value="`!joinvc`, `!leavevc`, `!speak <text>`, `!vcroast [user]`, `!vchype`", inline=False)
+    embed.add_field(name="🎲 Predictions & Coins", value="`!predict`, `!bet`, `!predictions`, `!coins`, `!dailycoins`, `!coinboard`", inline=False)
+    embed.add_field(name="🎖️ Leveling & Badges", value="`!rank [@user]`, `!topviewers` — Earn XP by chatting and voice hangout", inline=False)
     embed.add_field(name="📺 YouTube Live Timings", value="`!livetiming` or `/livetiming` — Live stream updates for @AALU_CHIPAS", inline=False)
     embed.add_field(name="👥 Member Directory", value="`!members [role]` and `/tagmember <name>` to find & tag anyone!", inline=False)
     embed.add_field(name="🎮 Game Analytics", value="`!gamehistory [@user]` and `!topgames` to track gaming history", inline=False)
     embed.add_field(name="🤖 Inter-Bot Power", value="`!botcmd <cmd>` or `/usebot <cmd>` to command other bots", inline=False)
-    embed.add_field(name="🎭 Dynamic Mood", value="`!mood` to check Tillu's mood (Sarcastic, Funny, Sad Sarcastic, Wholesome)", inline=False)
+    embed.add_field(name="🎭 Dynamic Mood & Memes", value="`!mood` and `!meme [category]` from Tillu's 130+ meme vault", inline=False)
     embed.add_field(name="🧠 Teach & Remember", value="`tillu yaad rakh <baat>` or `/remember <fact>`", inline=False)
     embed.add_field(name="📖 View Memories", value="`/memories` to see learned knowledge", inline=False)
     embed.set_footer(text="Tillu • 24/7 Always-Online Co-Host")
@@ -2592,10 +3010,16 @@ async def on_message(message: discord.Message):
     if not raw_text and message.embeds:
         raw_text = " ".join([e.description or "" for e in message.embeds if e.description])
 
-    # Record member gaming presence
+    # Record member gaming presence & award chat XP
     if not message.author.bot and isinstance(message.author, discord.Member):
         try:
             player_analytics.record_presence(message.author)
+        except Exception:
+            pass
+        try:
+            leveled_up, new_lvl, _ = loyalty_system.add_message_xp(message.author.id, message.author.display_name)
+            if leveled_up and new_lvl in (5, 10, 20, 25, 50, 100):
+                await message.channel.send(f"🎉 **Level Up!** Wah re cheete {message.author.mention}! Level `{new_lvl}` unlock ho gaya tera! 🎖️")
         except Exception:
             pass
 
@@ -3050,6 +3474,18 @@ async def scheduled_sync_loop():
         except Exception as ex:
             logging.error(f"[AutoPresenceSync] Error on {g.name}: {ex}")
 
+@tasks.loop(minutes=5)
+async def scheduled_voice_xp_loop():
+    """Awards voice XP (15 XP/5 min) to active community members in voice channels."""
+    for g in bot.guilds:
+        try:
+            for vc in g.voice_channels:
+                for member in vc.members:
+                    if not member.bot and not member.voice.afk:
+                        loyalty_system.add_voice_xp(member.id, minutes=5, user_name=member.display_name)
+        except Exception as ex:
+            logging.debug(f"[AutoVoiceXPSync] {ex}")
+
 # ── 5x DAILY AUTONOMOUS SELF-REFLECTION LOOP (Every 4.8 Hours) ───────────────
 @tasks.loop(hours=4.8)
 async def scheduled_self_reflection_loop():
@@ -3125,6 +3561,13 @@ async def on_ready():
             scheduled_sync_loop.start()
     except Exception as se:
         logging.warning(f"[ScheduledSync Init] {se}")
+
+    try:
+        if not scheduled_voice_xp_loop.is_running():
+            scheduled_voice_xp_loop.start()
+            logging.info("[ScheduledVoiceXP] Voice XP loyalty loop started.")
+    except Exception as vxe:
+        logging.warning(f"[ScheduledVoiceXP Init] {vxe}")
 
     try:
         if not scheduled_self_reflection_loop.is_running():

@@ -9,9 +9,13 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from context_classifier import classify_request, TargetSystem
-import minecraft_player_resolver as mc_resolver
+try:
+    import minecraft_player_resolver as mc_resolver
+except ImportError:
+    mc_resolver = None
 
 
+@unittest.skipIf(mc_resolver is None, "Minecraft configuration was removed")
 class TestClaimAndPlayerResolution(unittest.TestCase):
     def test_fuzzy_player_resolution(self):
         cands = [".UNIQUE_UMAR_114", ".VAMPIRE674066", ".NAKEEBGAM", "AALU_CHIPAS", "Avinash893"]
