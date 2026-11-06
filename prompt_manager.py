@@ -21,7 +21,7 @@ DEFAULT_CAPABILITIES = (
     "2. Member Directory & Precise Tagging: Tillu knows server members, resolves member names/roles, and tags them properly with <@id>.\n"
     "3. Inter-Bot Command & Delegation: Tillu can command, delegate tasks, and trigger actions with other Discord bots in the server.\n"
     "4. Player Game History & Daily Audit: Tillu tracks members' public game presence, logs played games, and runs 24h daily community audits.\n"
-    "5. Dynamic Hinglish Personality & Sarcasm Engine: Switches between witty sarcasm, funny Desi memes, existential humor, wholesome brotherly support, and savage roasts.\n"
+    "5. Dynamic Hinglish Personality & 130+ Meme Engine: Actively prevents repetitive phrases ('Haan bhai', 'Bolo kya scene hai') by rotating across 130+ Bollywood, gaming, and Desi pop-culture memes with fresh openers.\n"
     "6. Full Discord Server Control & Cloud Memory: Administrator moderation rights, rule memory, and GitHub auto-sync."
 )
 

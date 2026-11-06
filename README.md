@@ -7,6 +7,7 @@ Tillu is an autonomous Hinglish AI co-host and Discord community manager built f
 ## Features
 
 - Dynamic Personality Engine: Switches dynamically between Sarcastic, Funny, Sad Sarcastic, Wholesome, and Savage tones.
+- 130+ Meme & Anti-Repetition Vault: Over 130 Bollywood, Desi OTT, gaming, and Gen-Z memes with active anti-phrase loop protection so Tillu never repeats identical starters.
 - YouTube Live Tracking: Real-time stream timings and live broadcast detection via the YouTube Data API.
 - Member Directory & Tagging: Look up server members by role or name and tag them cleanly in chat.
 - Gaming Presence Telemetry: Tracks games played by server members using public Discord activities into an ongoing history.
@@ -25,6 +26,8 @@ Tillu is an autonomous Hinglish AI co-host and Discord community manager built f
 | `/tagmember <name>` | Finds a member by name/query and mentions them | Everyone |
 | `/gamehistory [@user]` | Shows games played by a member based on Discord activity | Everyone |
 | `/topgames` | Displays leaderboard of games played across the server | Everyone |
+| `/meme [category]` | Drops a fresh Bollywood, Indian gaming, or Desi meme from 130+ vault | Everyone |
+| `/memestats` | Shows the category breakdown of Tillu's 130+ meme collection | Everyone |
 | `/usebot <command>` | Commands or delegates a task to another bot | Admin / Mod |
 | `/mood [mood_name]` | Views or sets Tillu's active personality tone | Everyone / Staff |
 | `/status` | Checks Tillu bot health and stream status | Everyone |

@@ -182,6 +182,7 @@ from youtube_tracker import YouTubeTracker
 from mood_engine import MoodEngine, TilluMood
 from player_analytics import PlayerAnalytics
 from member_directory import MemberDirectory
+from meme_engine import meme_engine, MemeEngine
 
 hot_reloader = HotReloader()
 youtube_tracker = YouTubeTracker()
@@ -335,6 +336,11 @@ DYNAMIC HINGLISH PERSONALITY & SARCASM RULES:
 - Keep casual chat punchy (1-3 lines max). Never write long boring essays unless specifically asked!
 - When Avinash (Owner / Boss) talks to you, show utmost loyalty, obedience, and respect ("Haan Boss!", "Jo hukum Sarkar!").
 - ZERO INTERNAL MONOLOGUE / NO THINKING DUMP: Never output "<think>" or step-by-step reasoning analysis. Output ONLY Tillu's direct conversational words.
+
+STRICT ANTI-REPETITION & 130+ MEME REPERTOIRE:
+- CRITICAL: STOP USING THE SAME PHRASES! Never repeat "Haan bhai", "Tillu hazir hai", "bolo kya scene hai", "kya scene hai bhai".
+- Use diverse, colorful Bollywood, Indian gaming, and Desi pop-culture memes from your 130+ meme bank (Hera Pheri, Mirzapur, Panchayat, Welcome, Munna Bhai, 3 Idiots, CarryMinati, Dynamo, etc.).
+- Switch your greeting, opening hook, and comedic punchline on EVERY response. No two responses should sound identical!
 """
 
 
@@ -887,8 +893,9 @@ def build_full_system_context(user_name: str, user_id: int = 0, is_admin: bool =
         f"- Note: Minecraft server has been permanently shut down and deleted."
     )
 
-    # Dynamic mood instructions
-    _, mood_instructions = mood_engine.pick_mood(context_hint=user_name)
+    # Dynamic mood instructions and 130+ meme anti-repetition injection
+    active_mood, mood_instructions = mood_engine.pick_mood(context_hint=user_name)
+    meme_injection = meme_engine.get_prompt_injection(active_mood.value, user_name)
 
     bots_summary = bot_orch.format_inter_bot_context()
     if bots_summary:
@@ -912,6 +919,7 @@ def build_full_system_context(user_name: str, user_id: int = 0, is_admin: bool =
     return (
         f"{SYSTEM_KNOWLEDGE}\n\n"
         f"{mood_instructions}\n\n"
+        f"{meme_injection}\n\n"
         f"{prompt_ext}\n\n"
         f"{memory_context}\n\n"
         f"{stream_telemetry}\n\n"
@@ -1004,26 +1012,27 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
     lower_p = prompt.lower()
     # 1. Minecraft queries -> Server is permanently closed/deleted
     if any(w in lower_p for w in ["minecraft", "smp", "whitelist", "wl", "ip", "port", "server start", "hexacraft"]):
-        return mood_engine.format_mood_response(
-            "Arre bhai, Minecraft server kabka band aur delete ho gaya hai! Ab Aalu YouTube live streams pe dhyan de raha hai. `/livetiming` type karo ya stream pe chalo! 📺✨"
-        )
+        return meme_engine.get_fallback_meme_response("minecraft_deleted")
 
     # 2. YouTube Live Timing query
     if any(w in lower_p for w in ["live", "stream", "timing", "kab aayega", "youtube", "aalu live"]):
         try:
             return youtube_tracker.get_live_status_response()
         except Exception:
-            return "📺 Aalu daily shaam ya raat ko YouTube par live aata hai! Check out: https://youtube.com/@AALU_CHIPAS"
+            opener = meme_engine.get_fresh_opener()
+            return f"📺 {opener} Aalu daily shaam ya raat ko YouTube par live aata hai! Check out: https://youtube.com/@AALU_CHIPAS"
 
     # 3. Member query
     if any(w in lower_p for w in ["members", "who is in server", "tag members", "list members"]):
-        return "👥 Server members dekhne aur tag karne ke liye `/members` ya `/tagmember <name>` use karo!"
+        opener = meme_engine.get_fresh_opener()
+        return f"👥 {opener} Server members dekhne aur tag karne ke liye `/members` ya `/tagmember <name>` use karo!"
 
     # 4. Game history query
     if any(w in lower_p for w in ["games", "top games", "khel raha", "game history"]):
-        return "🎮 Community me log kya khel rahe hain dekhne ke liye `/topgames` ya `/gamehistory @user` use karo!"
+        opener = meme_engine.get_fresh_opener()
+        return f"🎮 {opener} Community me log kya khel rahe hain dekhne ke liye `/topgames` ya `/gamehistory @user` use karo!"
 
-    return f"⚠️ Arre yaar, Tillu AI se connect nahi ho pa raha abhi. ({last_err})"
+    return meme_engine.get_fallback_meme_response("busy")
 
 # ── DISCORD BOT & UI ─────────────────────────────────────────────────────────
 intents = discord.Intents.default()
@@ -1672,7 +1681,7 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
         answer = await asyncio.to_thread(query_gemini, query_with_classifier, str(user), user_id, is_admin, author_is_owner, target_guild)
     answer = clean_thought_process(answer)
     if not answer:
-        answer = "Haan bhai! Tillu hazir hai, bolo kya scene hai? 🚀"
+        answer = meme_engine.get_fallback_meme_response("general")
 
     # 0. Check for DISCORD_INTENT (Discord roles, channels, purge, timeouts, Discord bans)
     if "DISCORD_INTENT:" in answer:
@@ -1839,7 +1848,10 @@ async def slash_pause(interaction: discord.Interaction):
 async def slash_resume(interaction: discord.Interaction):
     global TILLU_PAUSED
     TILLU_PAUSED = False
-    await safe_send_interaction(interaction, "▶️ **Tillu Resumed!** Main wapas active hu, bolo kya scene hai! 🚀")
+    opener = meme_engine.get_fresh_opener()
+    memes = meme_engine.pick_fresh_memes("funny", count=1)
+    meme_line = f" ({memes[0]['text']})" if memes else ""
+    await safe_send_interaction(interaction, f"▶️ **Tillu Resumed!** {opener} Main wapas active hu!{meme_line} 🚀")
 
 @bot.tree.command(name="tts", description="Make Tillu speak out loud using Discord TTS")
 @app_commands.describe(message="The message Tillu should speak out loud")
@@ -1925,6 +1937,36 @@ async def slash_mood(interaction: discord.Interaction, mood_name: Optional[str] 
     else:
         curr = mood_engine.current_mood.value
         await safe_send_interaction(interaction, f"🎭 Tillu's current dynamic mood is **{curr.upper()}**!\n(Available moods: `sarcastic`, `funny`, `sad_sarcastic`, `wholesome`, `savage`)", ephemeral=True)
+
+@bot.tree.command(name="meme", description="Drop a hilarious Indian, Bollywood, or Gaming meme from Tillu's 130+ vault")
+@app_commands.describe(category="Optional category: sarcastic, funny, gaming, sad_sarcastic, savage, wholesome")
+async def slash_meme(interaction: discord.Interaction, category: Optional[str] = None):
+    memes = meme_engine.pick_fresh_memes(category, count=1)
+    if not memes:
+        await safe_send_interaction(interaction, "Koi meme nahi mila bhai!", ephemeral=True)
+        return
+    m = memes[0]
+    opener = meme_engine.get_fresh_opener()
+    embed = discord.Embed(
+        title=f"🎭 {m['origin']}",
+        description=f"### \"{m['text']}\"\n\n*{opener} Tillu special drop!*",
+        color=0x9B59B6
+    )
+    embed.set_footer(text=f"Category: {m['category'].upper()} • 130+ Tillu Meme Vault")
+    await safe_send_interaction(interaction, embed=embed)
+
+@bot.tree.command(name="memestats", description="View Tillu's 130+ Bollywood & Gaming meme library breakdown")
+async def slash_memestats(interaction: discord.Interaction):
+    total = meme_engine.get_total_count()
+    cats = meme_engine.get_category_counts()
+    lines = [f"• **{cat.capitalize()}**: `{cnt}` memes" for cat, cnt in cats.items()]
+    embed = discord.Embed(
+        title=f"🎭 Tillu's 130+ Meme Vault ({total} Total)",
+        description="Tillu's anti-repetition engine actively cycles across 130+ curated memes to ensure 100% variety in every response:\n\n" + "\n".join(lines),
+        color=0x2ECC71
+    )
+    embed.set_footer(text="Anti-Repetition & Variety Engine Active • Synced to GitHub")
+    await safe_send_interaction(interaction, embed=embed, ephemeral=True)
 
 @bot.tree.command(name="remember", description="Teach Tillu a fact, rule, or server setting to remember permanently")
 @app_commands.describe(fact="What should Tillu remember? (e.g. 'Server rules: No griefing' or 'End dimension opens on Sunday')")
@@ -2226,7 +2268,10 @@ async def cmd_pause(ctx):
 async def cmd_resume(ctx):
     global TILLU_PAUSED
     TILLU_PAUSED = False
-    await ctx.send("▶️ **Tillu Resumed!** Main wapas active hu, bolo kya scene hai! 🚀")
+    opener = meme_engine.get_fresh_opener()
+    memes = meme_engine.pick_fresh_memes("funny", count=1)
+    meme_line = f" ({memes[0]['text']})" if memes else ""
+    await ctx.send(f"▶️ **Tillu Resumed!** {opener} Main wapas active hu!{meme_line} 🚀")
 
 @bot.command(name="backup", aliases=["serverbackup"])
 async def cmd_backup(ctx):
@@ -2282,6 +2327,34 @@ async def cmd_mood(ctx, *, mood_name: str = None):
     else:
         curr = mood_engine.current_mood.value
         await ctx.send(f"🎭 Tillu's current dynamic mood is **{curr.upper()}**!\n(Available moods: `sarcastic`, `funny`, `sad_sarcastic`, `wholesome`, `savage`)")
+
+@bot.command(name="meme", aliases=["dropmeme", "roastme"])
+async def cmd_meme(ctx, *, category: str = None):
+    memes = meme_engine.pick_fresh_memes(category, count=1)
+    if not memes:
+        return await ctx.send("Koi meme nahi mila bhai!")
+    m = memes[0]
+    opener = meme_engine.get_fresh_opener()
+    embed = discord.Embed(
+        title=f"🎭 {m['origin']}",
+        description=f"### \"{m['text']}\"\n\n*{opener} Tillu special drop!*",
+        color=0x9B59B6
+    )
+    embed.set_footer(text=f"Category: {m['category'].upper()} • 130+ Tillu Meme Vault")
+    await ctx.send(embed=embed)
+
+@bot.command(name="memestats", aliases=["memecount", "memes"])
+async def cmd_memestats(ctx):
+    total = meme_engine.get_total_count()
+    cats = meme_engine.get_category_counts()
+    lines = [f"• **{cat.capitalize()}**: `{cnt}` memes" for cat, cnt in cats.items()]
+    embed = discord.Embed(
+        title=f"🎭 Tillu's 130+ Meme Vault ({total} Total)",
+        description="Tillu's anti-repetition engine actively cycles across 130+ curated memes to ensure 100% variety in every response:\n\n" + "\n".join(lines),
+        color=0x2ECC71
+    )
+    embed.set_footer(text="Anti-Repetition & Variety Engine Active • Synced to GitHub")
+    await ctx.send(embed=embed)
 
 @bot.command(name="addbot", aliases=["invitebot", "botinvite"])
 async def cmd_addbot(ctx, *, bot_query: str = None):
@@ -2718,7 +2791,10 @@ async def on_message(message: discord.Message):
 
     if re.search(r'^(?:hey\s+|arre\s+)?(?:tillu|mr\s*tillu)?\s*(?:resume|unpause|start|bolna\s*shuru|wapas\s*aa\s*ja)$', content_lower) or content_lower in ["!resume", "!unpause", "tillu resume", "tillu unpause"]:
         TILLU_PAUSED = False
-        await message.channel.send("▶️ **Tillu Resumed!** Main wapas active hu, bolo kya scene hai! 🚀")
+        opener = meme_engine.get_fresh_opener()
+        memes = meme_engine.pick_fresh_memes("funny", count=1)
+        meme_line = f" ({memes[0]['text']})" if memes else ""
+        await message.channel.send(f"▶️ **Tillu Resumed!** {opener} Main wapas active hu!{meme_line} 🚀")
         return
 
     # If Tillu is paused, ignore all messages

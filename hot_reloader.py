@@ -23,6 +23,7 @@ RELOADABLE_MODULES = [
     "discord_action_manager",
     "youtube_tracker",
     "mood_engine",
+    "meme_engine",
     "player_analytics",
     "member_directory",
     "bot_orchestrator",

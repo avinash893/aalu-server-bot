@@ -122,3 +122,23 @@ class MoodEngine:
         chosen = random.choices(moods, weights=probabilities, k=1)[0]
         self.last_mood = chosen
         return chosen, MOOD_PROMPT_MODIFIERS[chosen]
+
+    @property
+    def current_mood(self) -> TilluMood:
+        return self.forced_mood or self.last_mood
+
+    def set_fixed_mood(self, mood_name: Optional[str]) -> TilluMood:
+        res = self.set_forced_mood(mood_name)
+        return res or self.last_mood
+
+    def format_mood_response(self, base_text: str, mood: Optional[TilluMood] = None) -> str:
+        """
+        Enriches a response with a fresh opener and random punchline from the 130+ meme engine.
+        Ensures Tillu never uses the same opening phrase repeatedly.
+        """
+        from meme_engine import meme_engine
+        active = mood or self.current_mood
+        opener = meme_engine.get_fresh_opener()
+        memes = meme_engine.pick_fresh_memes(category=active.value, count=1)
+        meme_quote = f" *(\"{memes[0]['text']}\")*" if memes else ""
+        return f"{opener} {base_text}{meme_quote}"
