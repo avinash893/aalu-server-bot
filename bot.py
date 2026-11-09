@@ -51,15 +51,6 @@ if os.path.exists(env_path):
                 os.environ.setdefault(k.strip(), v.strip())
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-SERVER_HOST = os.environ.get("SERVER_HOST", "legacy-7.hexacraft.fun")
-
-# Decouple Minecraft server port from Pterodactyl container allocation port (19133)
-_raw_mc_port = os.environ.get("MC_SERVER_PORT") or os.environ.get("MINECRAFT_PORT")
-if _raw_mc_port and str(_raw_mc_port).strip() not in ("19133", "19132", "10000", "8080", "5000"):
-    SERVER_PORT = int(_raw_mc_port)
-else:
-    _env_p = str(os.environ.get("SERVER_PORT", "25587")).strip()
-    SERVER_PORT = 25587 if _env_p in ("19133", "19132", "10000", "8080", "5000", "") else int(_env_p)
 
 PRIMARY_GUILD_ID = int(os.environ.get("PRIMARY_GUILD_ID", "1456298447979286541"))
 CS2_GUILD_ID = int(os.environ.get("CS2_GUILD_ID", "1530719250237362297"))
@@ -68,9 +59,6 @@ CONSOLE_CHANNEL_ID = int(os.environ.get("CONSOLE_CHANNEL_ID", "14861144576744530
 WHITELIST_CHANNEL_ID = int(os.environ.get("WHITELIST_CHANNEL_ID", "1511614214962151585"))
 CHAT_CHANNEL_ID = int(os.environ.get("CHAT_CHANNEL_ID", "1456299736326733998"))
 
-PTERO_URL = os.environ.get("PTERO_URL", "https://panel.hexacraft.fun")
-PTERO_KEY = os.environ.get("PTERO_KEY", "")
-PTERO_SERVER = os.environ.get("PTERO_SERVER", "14c2ebb6")
 PORT = int(os.environ.get("PORT", "10000"))
 RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "https://aalu-server-bot.onrender.com")
 
@@ -1073,29 +1061,6 @@ def contains_reel_or_video(message: discord.Message) -> bool:
             return True
     return False
 
-def should_show_server_options(text: str) -> bool:
-    t = text.lower().strip()
-    keywords = [
-        "livetiming", "live timing", "stream timing", "youtube live",
-        "community", "top games", "members", "tag member",
-        "server ip", "minecraft", "whitelist"
-    ]
-    return any(k in t for k in keywords)
-
-class WhitelistModal(discord.ui.Modal, title="Server Notification"):
-    note = discord.ui.TextInput(
-        label="Message",
-        default="Minecraft server has been closed! Check /livetiming for YouTube streams.",
-        required=False
-    )
-
-    async def on_submit(self, interaction: discord.Interaction):
-        await safe_send_interaction(
-            interaction,
-            "🚫 **Minecraft Server Closed:** The Minecraft server has been permanently shut down. Check out Aalu's YouTube streams using `/livetiming`!",
-            ephemeral=True
-        )
-
 async def get_or_create_memory_channel(guild: discord.Guild) -> discord.TextChannel | None:
     """Find or auto-create the dedicated #tillu-memory channel."""
     if not guild:
@@ -1809,19 +1774,8 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
     # - Normal chat in channel (on_message) -> Publicly visible as clean plain text, NO EMBEDS!
     chunks = split_discord_chunks(answer, 1950)
     if is_inter:
-        if should_show_server_options(query):
-            embed = discord.Embed(
-                title="🤖 Tillu",
-                description=chunks[0][:4000],
-                color=0x9B59B6
-            )
-            embed.set_footer(text="Tillu • legacy-7.hexacraft.fun")
-            await reply_fn(embed=embed, view=ServerControlView())
-            for c in chunks[1:]:
-                await reply_fn(content=c)
-        else:
-            for c in chunks:
-                await reply_fn(content=c)
+        for c in chunks:
+            await reply_fn(content=c)
     elif isinstance(interaction_or_ctx, commands.Context):
         for c in chunks:
             await reply_fn(content=c, delete_after=45)
@@ -1880,9 +1834,9 @@ async def slash_tts(interaction: discord.Interaction, message: str):
     except Exception as e:
         await safe_send_interaction(interaction, f"❌ Failed to send TTS message: {e}", ephemeral=True)
 
-@bot.tree.command(name="ask", description="Ask Tillu anything about the server, stream, or request whitelist!")
+@bot.tree.command(name="ask", description="Ask Tillu anything about the stream, games, or community!")
 @app_commands.describe(
-    query="What would you like to ask Tillu? (e.g. 'whitelist me GamerX' or 'how to join SMP')",
+    query="What would you like to ask Tillu? (e.g. 'live timing' or 'top games')",
     attachment="Optional image screenshot or photo to show Tillu"
 )
 async def slash_ask(interaction: discord.Interaction, query: str, attachment: Optional[discord.Attachment] = None):
@@ -2972,18 +2926,10 @@ async def on_member_join(member: discord.Member):
             f"Mai hu **Tillu**, aapka sarcastic & witty co-host! 🤖\n\n"
             f"• Aalu ki YouTube live stream timings janne ke liye `/livetiming` type karo!\n"
             f"• Server me kaun kya khel raha hai dekhne ke liye `/topgames` ya `/gamehistory` check karo!\n"
-            f"• Kisi bhi cheez ke liye bas `@Tillu` bol ke puch lo! 🚀"
+            f"• Kisi bhi cheez ke liye bas `@Tillu` bol ke chat me pooch lo! 🚀"
         )
-        embed = discord.Embed(
-            title="👋 Welcome to the Aalu Community!",
-            description=welcome_text,
-            color=0x9B59B6
-        )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.add_field(name="📺 YouTube Channel", value="[@AALU_CHIPAS](https://youtube.com/@AALU_CHIPAS)", inline=False)
-        embed.set_footer(text="Tillu • 24/7 Always-Online Co-Host")
         try:
-            await channel.send(embed=embed, view=CommunityView())
+            await channel.send(welcome_text)
         except Exception as e:
             logging.error(f"[on_member_join] Error sending welcome: {e}")
 
@@ -3000,7 +2946,7 @@ async def handle_players_command(channel, user=None):
     top_games = player_analytics.get_top_games()
     embed = discord.Embed(
         title="🎮 Community Top Games & Player Activity",
-        description="Aalu SMP Minecraft server permanently close ho chuka hai! Ye hai humari community ka gaming activity:",
+        description="Ye hai humari community ka live gaming leaderboard & activity:",
         color=0x2ECC71,
         timestamp=discord.utils.utcnow()
     )
