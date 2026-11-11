@@ -1034,7 +1034,7 @@ def query_gemini(prompt: str, user_name: str, user_id: int = 0, is_admin: bool =
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-intents.presences = True
+intents.presences = False
 
 start_lock = asyncio.Lock()
 is_starting = False
@@ -2797,7 +2797,7 @@ async def cmd_rank(ctx, member: discord.Member = None):
     embed.add_field(name="Unlocked Badges", value=badge_str, inline=False)
     await ctx.send(embed=embed)
 
-@bot.command(name="topviewers", aliases=["leaderboard", "topchatters"])
+@bot.command(name="topviewers", aliases=["viewerboard", "topchatters"])
 async def cmd_topviewers(ctx):
     top = loyalty_system.get_top_viewers(limit=10)
     if not top:
