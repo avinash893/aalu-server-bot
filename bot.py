@@ -218,13 +218,14 @@ def record_user_context(user_id: int, role: str, text: str):
         user_context_windows[user_id] = deque(maxlen=MAX_USER_HISTORY)
     user_context_windows[user_id].append({"role": role, "text": text.strip()})
 
-COOLDOWN_SECONDS = 20
+COOLDOWN_SECONDS = 5
 user_cooldowns = {}
 
 # ── TILLU PAUSE STATE & PERMISSIONS ──────────────────────────────────────────
 TILLU_PAUSED = False
 WHITELIST_REGISTRY_PATH = os.path.join(os.path.dirname(__file__), "whitelist_registry.json")
-OWNER_ONLY_MODE = False
+OWNER_ONLY_MODE = False  # Disabled: Tillu chats with all server members freely
+last_channel_activity = {}  # channel_id -> timestamp of Tillu's last reply (for conversation continuity)
 
 def is_owner(user, guild=None) -> bool:
     """Check if user is the Server Owner (Avinash / AALU_CHIPAS)."""
@@ -1586,7 +1587,8 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
             return
 
     author_is_owner = is_owner(user, target_guild)
-    if OWNER_ONLY_MODE and not author_is_owner:
+    # OWNER_ONLY_MODE disabled so all members can chat with Tillu freely
+    if OWNER_ONLY_MODE and not author_is_owner and not is_admin:
         if is_inter:
             await reply_fn(content="🤫 **Boss (Avinash) ne silent mode activate kiya hai!** Abhi Tillu sirf Owner ki sunega.")
         return
@@ -1712,10 +1714,12 @@ async def handle_ask_request(interaction_or_ctx, query: str, user, guild=None, b
             bot_cmd = match.group(1).strip()
             clean_reply = re.sub(r'BOT_COMMAND:.*?\n?', '', answer).strip()
             # Intercept accidental voice bot summoning and redirect to native Voice CoHost!
-            if bot_cmd.lower() in ("!join", "/join", "!connect", "-join", ".join"):
-                if getattr(user, "voice", None) and user.voice.channel:
-                    await voice_cohost.join_channel(user.voice.channel)
-                    await reply_fn(content=f"🎙️ **Tillu VC Connected!** Main **{user.voice.channel.name}** me aa gaya hoon Boss! (Apna native voice system use kar raha hoon!)")
+            if any(bot_cmd.lower().strip().startswith(p) for p in ("!join", "/join", "!connect", "-join", ".join", "join")):
+                target_member = target_guild.get_member(user.id) if (target_guild and hasattr(user, "id")) else user
+                v_state = getattr(target_member, "voice", None) or getattr(user, "voice", None)
+                if v_state and v_state.channel:
+                    await voice_cohost.join_channel(v_state.channel)
+                    await reply_fn(content=f"🎙️ **Tillu VC Connected!** Main **{v_state.channel.name}** me aa gaya hoon Boss! (Apna native voice system use kar raha hoon!)")
                     return
                 else:
                     await reply_fn(content="❌ Pehle kisi voice channel me connect ho jao Sarkar, fir mujhe bulao!")
@@ -3184,13 +3188,13 @@ async def on_message(message: discord.Message):
     if TILLU_PAUSED:
         return
 
-    # ── OWNER COMMANDS (STOP / RESUME SILENT MODE) ─────────────────────────────
-    if author_is_owner and re.search(r'^(?:hey\s+|arre\s+)?(?:tillu|mr\s*tillu)?\s*(?:stop|quiet|chup|shant|mute|chup\s*raho|bolna\s*band|shut\s*up|so\s*ja)$', content, re.IGNORECASE):
+    # ── OWNER COMMANDS (EXPLICIT SILENT MODE TOGGLE) ───────────────────────────
+    if author_is_owner and re.search(r'^(?:tillu\s+)?(?:owner\s*only\s*mode\s*on|enable\s*owner\s*only)$', content_lower):
         OWNER_ONLY_MODE = True
-        await message.channel.send("🤫 **Yes Boss (Avinash)!** Muh pe taala laga liya. Ab se main **sirf aapki sununga**, baaki sab ignore mode me hain.")
+        await message.channel.send("🤫 **Yes Boss (Avinash)!** Owner-only mode ON ho gaya. Ab se main **sirf aapki sununga**.")
         return
 
-    if author_is_owner and re.search(r'^(?:hey\s+|arre\s+)?(?:tillu|mr\s*tillu)?\s*(?:start|unmute|resume|bolna\s*shuru\s*kar|chalu\s*ho\s*ja|ab\s*sabse\s*bol|aawaz\s*nikal|unstop)$', content, re.IGNORECASE):
+    if author_is_owner and re.search(r'^(?:tillu\s+)?(?:owner\s*only\s*mode\s*off|disable\s*owner\s*only|everyone\s*mode)$', content_lower):
         OWNER_ONLY_MODE = False
         await message.channel.send("🚀 **Boss ka green signal aa gaya!** Tillu is back in action for everyone! Sab log sawaal pucho.")
         return
@@ -3227,11 +3231,18 @@ async def on_message(message: discord.Message):
         await msg.edit(content=None, embed=embed)
         return
 
-    # When OWNER_ONLY_MODE is active, ignore anyone who is NOT the Owner!
-    if OWNER_ONLY_MODE and not author_is_owner:
-        return
+    # ── LOOSENED CHAT & TRIGGER RECOGNITION (Chat freely with all members) ───
+    ch_name_lower = getattr(message.channel, "name", "").lower()
+    is_bot_channel = any(k in ch_name_lower for k in ["tillu", "bot", "ai-chat", "talk-to-tillu", "chat-with-tillu"])
+    is_recent_conv = (time.time() - last_channel_activity.get(message.channel.id, 0)) < 45
 
-    match_tillu = bool(re.search(r'\b(tillu|mr\s*tillu)\b', content, re.IGNORECASE))
+    match_tillu = bool(re.search(
+        r'\b(tillu|mr\s*tillu|mrtillu|tilu|tillo|tilloo|tiloo|tllu|tillu\s*bhai|tillu\s*ji)\b'
+        r'|(?:hey|hi|hello|arre|oye|bhai|sun)\s+(?:tillu|bot)\b'
+        r'|\b(?:bot\s+bhai|tillu\s+bot)\b',
+        content,
+        re.IGNORECASE
+    ))
 
     # Whitelist channel dedicated check
     is_whitelist_channel = (
@@ -3242,8 +3253,16 @@ async def on_message(message: discord.Message):
     # Check if message is addressed to Tillu:
     # 1. Mentioned (@Tillu)
     # 2. Reply to Tillu
-    # 3. Explicitly named "tillu" or "mr tillu"
-    is_addressed_to_tillu = is_mentioned or is_reply_to_bot or match_tillu
+    # 3. Explicitly named "tillu" or spelling variants / bot call
+    # 4. In dedicated bot/tillu channels
+    # 5. Conversation continuity (follow-up within 45s of Tillu's reply)
+    is_addressed_to_tillu = (
+        is_mentioned
+        or is_reply_to_bot
+        or match_tillu
+        or is_bot_channel
+        or (is_recent_conv and not is_reply_to_other)
+    )
 
     # If in whitelist channel and someone typed pure IGN:
     if is_whitelist_channel:
@@ -3411,6 +3430,8 @@ async def on_message(message: discord.Message):
         return
 
     try:
+        if hasattr(message, "channel") and hasattr(message.channel, "id"):
+            last_channel_activity[message.channel.id] = time.time()
         async with message.channel.typing():
             await handle_ask_request(message, query, user=message.author, guild=message.guild, bypass_cooldown=True)
     except Exception as e:
